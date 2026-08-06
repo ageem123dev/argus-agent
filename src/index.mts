@@ -66,6 +66,31 @@ export {
   partition_findings,
   score_partition,
 } from "./ingest.mjs";
+export {
+  load_config,
+  parse_severities,
+  shared_config_path,
+  local_config_path,
+  DEFAULT_CONFIG,
+  DEFAULT_SEVERITIES,
+} from "./config.mjs";
+export type { ArgusConfig, ConfigLoad, IngestSourceConfig, LoadOptions } from "./config.mjs";
+export {
+  parse_coderabbit_reviews,
+  coderabbit_adapter,
+  load_reviews,
+  discover_coderabbit_dirs,
+  resolve_coderabbit_paths,
+  workspace_storage_roots,
+  CODERABBIT_SEVERITY,
+} from "./adapters/coderabbit.mjs";
+export type {
+  CodeRabbitReview,
+  CodeRabbitParseOptions,
+  LoadedReview,
+} from "./adapters/coderabbit.mjs";
+export { run_ingest, format_ingest_report } from "./ingest_run.mjs";
+export type { IngestRunOptions, IngestRunResult, ReviewIngestResult } from "./ingest_run.mjs";
 export type {
   FindingsAdapter,
   IngestOptions,

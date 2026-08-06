@@ -21,6 +21,14 @@ export interface Finding {
   title: string;
   /** The reviewer's own label, kept verbatim — not normalized into `topic`. */
   category?: string;
+  /**
+   * The reviewer's own identifier for this finding, when it has a stable one
+   * (CodeRabbit calls it a fingerprint). Kept for auditing a lesson back to
+   * the finding that produced it.
+   */
+  id?: string;
+  /** The reviewer's own severity word, before normalization. */
+  raw_severity?: string;
   /** Directory glob the finding sits in: the unit lessons generalize over. */
   locus?: string;
   /** Issue class from TOPICS, when one is recognizable. */

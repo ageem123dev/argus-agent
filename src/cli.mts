@@ -7,6 +7,9 @@
 //           [--record <file>] [--no-record]
 //           [--memory <file>] [--no-memory]
 //
+//     argus ingest [--repo <path>] [--from <file|dir>] [--severities critical,major]
+//                  [--commit <sha>] [--dry-run]
+//
 // Outputs the review with every trace visible: perception selectivity,
 // action log, reflection convergence, collaboration meta, governance
 // audit + trust.
@@ -32,6 +35,8 @@ import {
   resolve_commit,
 } from "./run_record.mjs";
 import { init } from "./init.mjs";
+import { parse_severities } from "./config.mjs";
+import { format_ingest_report, run_ingest } from "./ingest_run.mjs";
 
 const PROVIDERS = ["auto", "antigravity", "antigravity-shim", "anthropic", "offline"] as const;
 type Provider = (typeof PROVIDERS)[number];
@@ -51,6 +56,10 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
       "no-record": { type: "boolean", default: false },
       memory: { type: "string" },
       "no-memory": { type: "boolean", default: false },
+      from: { type: "string" },
+      severities: { type: "string" },
+      commit: { type: "string" },
+      "dry-run": { type: "boolean", default: false },
       force: { type: "boolean", default: false },
     },
   });
@@ -71,6 +80,24 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
     return 0;
   }
 
+  // `argus ingest` — compare a CodeRabbit review against the Argus run over
+  // the same commit, and learn from what Argus missed.
+  if (positionals[0] === "ingest") {
+    const repo_root = values.repo as string;
+    const report = run_ingest({
+      repo_root,
+      project: values.project || path.basename(path.resolve(repo_root)),
+      from: (values.from as string | undefined) ?? positionals[1],
+      severities: parse_severities(values.severities as string | undefined),
+      commit: values.commit as string | undefined,
+      dry_run: values["dry-run"] as boolean,
+      record_file: values.record as string | undefined,
+      memory_file: values.memory as string | undefined,
+    });
+    console.log(format_ingest_report(report));
+    return report.paths.length ? 0 : 1;
+  }
+
   const diff_file = positionals[0];
   if (!diff_file) {
     console.error(
@@ -79,7 +106,10 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
         "                 [--offline] [--no-tools] [--no-refine]\n" +
         "                 [--record <file>] [--no-record]\n" +
         "                 [--memory <file>] [--no-memory]\n" +
-        "       argus init [repo] [--force]   scaffold Claude Code integration",
+        "       argus init [repo] [--force]   scaffold Claude Code integration\n" +
+        "       argus ingest [--repo <path>] [--from <file|dir>]\n" +
+        "                 [--severities critical,major] [--commit <sha>] [--dry-run]\n" +
+        "                 learn from a CodeRabbit review of the same commit",
     );
     return 2;
   }

@@ -15,6 +15,12 @@ src/
 ├── perception.mts     # context gathering: modified files → imports → tests → config, token-budgeted
 ├── memory.mts         # 3-tier hierarchical memory + lesson distillation + ArgusMemory
 ├── memory_store.mts   # durable lesson store (.argus/memory.jsonl)
+├── findings.mts       # one normalized Finding shape, whoever produced it
+├── ingest.mts         # three-way partition against a second reviewer + scoring
+├── ingest_run.mts     # `argus ingest` — compare, score, learn from the misses
+├── config.mts         # argus.config.json + .argus/config.json + env, layered
+├── adapters/
+│   └── coderabbit.mts   # CodeRabbit's VS Code review store
 ├── reasoning.mts      # complexity routing + chain-of-thought + verify + ArgusReasoning (+ OfflineReasoning)
 ├── action.mts         # toolbox + guardrail sandwich (pre/HITL/post checks) + ArgusAction
 ├── reflection.mts     # generator-critic loop + skill library + experience replay + ArgusReflection
@@ -206,6 +212,77 @@ review, and reports itself in the CLI's `=== Memory ===` block.
 
 Records are scoped by `project`, and `.argus/` is gitignored, so lessons are local to
 one checkout. Nothing syncs them to CI or another machine.
+
+## Learning from a second reviewer
+
+CodeRabbit runs over the same commits Argus does. Its findings partition three
+ways, and the sets mean different things:
+
+| Set | Meaning |
+| --- | --- |
+| agreed | both found it — confirmation, and the least interesting set |
+| missed | only CodeRabbit found it — **the supervised signal** |
+| argus_only | only Argus found it — unconfirmed: a false positive, or a catch CodeRabbit doesn't do |
+
+```sh
+node dist/cli.mjs ingest --repo /path/to/repo --dry-run   # compare, write nothing
+node dist/cli.mjs ingest --repo /path/to/repo             # and learn from the misses
+```
+
+Only `missed` becomes memory. Argus-only findings are deliberately *not* fed
+back — reinforcing a reviewer's own unconfirmed findings is how it talks itself
+into its false positives. `confirmed%` in the report is a **floor** on precision,
+not precision: watch it across runs rather than reading one.
+
+Reviews are joined to Argus runs on the commit SHA — CodeRabbit records
+`headCommitId`, Argus records `commit` in `runs.jsonl`. A review with no matching
+run is reported and skipped, never treated as all-misses.
+
+### Configuring it
+
+Nothing about the location is hardcoded, because none of it is stable: the VS
+Code extension writes under `workspaceStorage/<workspace-hash>/`, and the
+filename is a *content hash that rotates on every review*. Argus scans a
+directory and identifies reviews by reading them.
+
+Two files, layered — later wins, key by key:
+
+| Source | For |
+| --- | --- |
+| `argus.config.json` at the repo root | policy, meant to be committed |
+| `.argus/config.json` | machine-local paths (gitignored) |
+| `ARGUS_CODERABBIT_PATH`, `ARGUS_CODERABBIT_SEVERITIES` | environment |
+| `--from`, `--severities` | one invocation |
+
+```jsonc
+// argus.config.json — committed policy
+{ "ingest": { "coderabbit": { "severities": ["critical", "major"] } } }
+```
+
+```jsonc
+// .argus/config.json — this machine only
+{ "ingest": { "coderabbit": {
+  "path": "C:\\Users\\you\\AppData\\Roaming\\Code\\User\\workspaceStorage\\<hash>\\coderabbit.coderabbit-vscode"
+} } }
+```
+
+`severities` names CodeRabbit's own words — `critical`, `major`, `minor`,
+`trivial` — not Argus's, so the setting means what CodeRabbit's documentation
+means. It defaults to `critical, major`; everything below that is counted and
+reported as skipped rather than silently dropped. Internally they map to
+Argus's scale (`critical`, `high`, `low`, `nit`), which only sets how heavily a
+lesson weighs.
+
+With no `path` configured, Argus falls back to scanning VS Code's
+`workspaceStorage` and matching the repo against each workspace's
+`categories.json`, which is the only link from a workspace hash back to a
+checkout. That is a convenience for an unconfigured first run, not a contract —
+set `path` and none of it runs.
+
+Everything in this path is non-throwing. Malformed JSON, an unexpected shape, a
+missing directory, or a comment with no fields yields fewer findings and a
+report, never an exception: ingestion improves memory in the background and must
+not be able to break the thing it improves.
 
 ## Invoking from Claude Code
 
