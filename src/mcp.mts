@@ -25,7 +25,12 @@ import {
   type AgyCallTrace,
   type AgyOptions,
 } from "./providers/antigravity.mjs";
-import { build_run_record, append_run_record, default_record_path } from "./run_record.mjs";
+import {
+  build_run_record,
+  append_run_record,
+  default_record_path,
+  resolve_commit,
+} from "./run_record.mjs";
 
 const PROVIDERS = ["antigravity", "antigravity-shim", "anthropic", "offline"] as const;
 
@@ -82,6 +87,13 @@ const INPUT = {
     .boolean()
     .default(true)
     .describe("Append a durable run record to <repo_root>/.argus/runs.jsonl."),
+  memory: z
+    .boolean()
+    .default(true)
+    .describe(
+      "On by default: recall lessons from past reviews of this repo, and retain new ones, " +
+        "in <repo_root>/.argus/memory.jsonl. Set false for a review uninfluenced by prior runs.",
+    ),
 };
 
 const OUTPUT = {
@@ -100,6 +112,8 @@ const OUTPUT = {
   files_discovered: z.number(),
   files_selected: z.number(),
   selectivity: z.number(),
+  memory_recalled: z.number(),
+  memory_stored: z.number(),
   reflection_iterations: z.number().optional(),
   reflection_converged: z.boolean().optional(),
   audit_entries: z.number(),
@@ -169,6 +183,7 @@ server.registerTool(
             ? new ArgusReasoning()
             : new OfflineReasoning();
 
+    // Memory is on by default; Argus opens the repo's store itself.
     const argus = new Argus({ reasoning });
     let outcome;
     try {
@@ -178,6 +193,7 @@ server.registerTool(
         repo_root,
         verify_with_tools: args.verify_with_tools,
         refine: args.refine,
+        remember: args.memory,
       });
     } catch (e) {
       return {
@@ -213,6 +229,7 @@ server.registerTool(
         build_run_record(outcome, {
           project,
           repo_root,
+          commit: resolve_commit(repo_root),
           provider: args.provider,
           invoked_via: "mcp",
           calls: agy_calls,
@@ -241,6 +258,8 @@ server.registerTool(
       files_discovered: p.files_discovered,
       files_selected: p.files_selected,
       selectivity: p.selectivity,
+      memory_recalled: (outcome.memory_meta.recalled as number) ?? 0,
+      memory_stored: (outcome.memory_meta.stored as number) ?? 0,
       reflection_iterations: r.iterations as number | undefined,
       reflection_converged: r.converged as boolean | undefined,
       audit_entries: (g.audit_entries as number) ?? 0,
@@ -261,6 +280,7 @@ server.registerTool(
       "",
       "---",
       `perception: ${p.files_selected}/${p.files_discovered} files selected (${(p.selectivity * 100).toFixed(1)}%)`,
+      `memory: ${JSON.stringify(outcome.memory_meta)}`,
       `reflection: ${JSON.stringify(outcome.reflection_meta)}`,
       `governance: audit_entries=${structured.audit_entries}, chain_ok=${structured.audit_chain_ok}`,
     ];

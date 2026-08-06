@@ -5,6 +5,7 @@
 //           [--provider auto|antigravity|antigravity-shim|anthropic|offline]
 //           [--offline] [--no-tools] [--no-refine]
 //           [--record <file>] [--no-record]
+//           [--memory <file>] [--no-memory]
 //
 // Outputs the review with every trace visible: perception selectivity,
 // action log, reflection convergence, collaboration meta, governance
@@ -14,6 +15,8 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 
 import { Argus } from "./argus.mjs";
+import { ArgusMemory, HierarchicalMemory } from "./memory.mjs";
+import { JsonlVectorDB } from "./memory_store.mjs";
 import { ArgusReasoning, OfflineReasoning } from "./reasoning.mjs";
 import {
   AntigravityReasoning,
@@ -26,6 +29,7 @@ import {
   build_run_record,
   append_run_record,
   default_record_path,
+  resolve_commit,
 } from "./run_record.mjs";
 import { init } from "./init.mjs";
 
@@ -45,6 +49,8 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
       "no-refine": { type: "boolean", default: false },
       record: { type: "string" },
       "no-record": { type: "boolean", default: false },
+      memory: { type: "string" },
+      "no-memory": { type: "boolean", default: false },
       force: { type: "boolean", default: false },
     },
   });
@@ -72,6 +78,7 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
         `                 [--provider ${PROVIDERS.join("|")}]\n` +
         "                 [--offline] [--no-tools] [--no-refine]\n" +
         "                 [--record <file>] [--no-record]\n" +
+        "                 [--memory <file>] [--no-memory]\n" +
         "       argus init [repo] [--force]   scaffold Claude Code integration",
     );
     return 2;
@@ -116,8 +123,17 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
           : new OfflineReasoning();
 
   const diff = fs.readFileSync(diff_file, "utf-8");
-  const argus = new Argus({ reasoning });
   const repo_root = values.repo as string;
+
+  // Memory is on by default; Argus opens <repo>/.argus/memory.jsonl itself.
+  // Only --memory needs wiring here, to put the store somewhere else.
+  const memory_file = values.memory as string | undefined;
+  const argus = new Argus({
+    reasoning,
+    ...(memory_file
+      ? { memory: new ArgusMemory(new HierarchicalMemory(new JsonlVectorDB(memory_file))) }
+      : {}),
+  });
 
   let outcome;
   try {
@@ -127,6 +143,7 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
       repo_root,
       verify_with_tools: !values["no-tools"],
       refine: !values["no-refine"],
+      remember: !values["no-memory"],
     });
   } catch (e) {
     console.error(`error: reasoning failed via provider "${provider}": ${
@@ -153,6 +170,17 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
   console.log(`\n=== Perception ===`);
   console.log(`  discovered/selected: ${p_trace.files_discovered}/${p_trace.files_selected}`);
   console.log(`  selectivity: ${(p_trace.selectivity * 100).toFixed(1)}%`);
+  console.log(`\n=== Memory ===`);
+  console.log(`  ${JSON.stringify(outcome.memory_meta)}`);
+  if (values["no-memory"]) {
+    console.log("  --no-memory: nothing recalled, nothing retained");
+  }
+  for (const lesson of argus.memory.trace.recalled) {
+    console.log(`  recalled: ${lesson}`);
+  }
+  for (const lesson of argus.memory.trace.stored) {
+    console.log(`  stored:   ${lesson}`);
+  }
   console.log(`\n=== Reflection ===`);
   console.log(`  ${JSON.stringify(outcome.reflection_meta)}`);
   console.log(`\n=== Collaboration ===`);
@@ -179,6 +207,7 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
     const record = build_run_record(outcome, {
       project,
       repo_root,
+      commit: resolve_commit(repo_root),
       provider,
       invoked_via: "cli",
       calls: agy_calls,
