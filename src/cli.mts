@@ -16,7 +16,7 @@ import * as path from "node:path";
 
 import { Argus } from "./argus.mjs";
 import { ArgusMemory, HierarchicalMemory } from "./memory.mjs";
-import { JsonlVectorDB, default_memory_path } from "./memory_store.mjs";
+import { JsonlVectorDB } from "./memory_store.mjs";
 import { ArgusReasoning, OfflineReasoning } from "./reasoning.mjs";
 import {
   AntigravityReasoning,
@@ -125,14 +125,15 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
   const diff = fs.readFileSync(diff_file, "utf-8");
   const repo_root = values.repo as string;
 
-  // Memory is persistent by default. Without this the agent recalls nothing:
-  // ArgusMemory's built-in store is process-local, so `### Past lessons` is
-  // empty on every run no matter how many reviews preceded it.
-  const memory_file = (values.memory as string | undefined) ?? default_memory_path(repo_root);
-  const store = values["no-memory"] ? null : new JsonlVectorDB(memory_file);
-  const memory = store ? new ArgusMemory(new HierarchicalMemory(store)) : new ArgusMemory();
-
-  const argus = new Argus({ reasoning, memory });
+  // Memory is on by default; Argus opens <repo>/.argus/memory.jsonl itself.
+  // Only --memory needs wiring here, to put the store somewhere else.
+  const memory_file = values.memory as string | undefined;
+  const argus = new Argus({
+    reasoning,
+    ...(memory_file
+      ? { memory: new ArgusMemory(new HierarchicalMemory(new JsonlVectorDB(memory_file))) }
+      : {}),
+  });
 
   let outcome;
   try {
@@ -142,6 +143,7 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
       repo_root,
       verify_with_tools: !values["no-tools"],
       refine: !values["no-refine"],
+      remember: !values["no-memory"],
     });
   } catch (e) {
     console.error(`error: reasoning failed via provider "${provider}": ${
@@ -169,15 +171,10 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
   console.log(`  discovered/selected: ${p_trace.files_discovered}/${p_trace.files_selected}`);
   console.log(`  selectivity: ${(p_trace.selectivity * 100).toFixed(1)}%`);
   console.log(`\n=== Memory ===`);
-  if (store) {
-    console.log(
-      `  ${store.size} lesson(s) in ${memory_file}` +
-        (store.last_error ? `  (degraded: ${store.last_error})` : ""),
-    );
-  } else {
-    console.log("  disabled (--no-memory): nothing recalled, nothing retained");
-  }
   console.log(`  ${JSON.stringify(outcome.memory_meta)}`);
+  if (values["no-memory"]) {
+    console.log("  --no-memory: nothing recalled, nothing retained");
+  }
   for (const lesson of argus.memory.trace.recalled) {
     console.log(`  recalled: ${lesson}`);
   }

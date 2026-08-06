@@ -18,8 +18,6 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 
 import { Argus } from "./argus.mjs";
-import { ArgusMemory, HierarchicalMemory } from "./memory.mjs";
-import { JsonlVectorDB, default_memory_path } from "./memory_store.mjs";
 import { ArgusReasoning, OfflineReasoning } from "./reasoning.mjs";
 import {
   AntigravityReasoning,
@@ -93,8 +91,8 @@ const INPUT = {
     .boolean()
     .default(true)
     .describe(
-      "Recall lessons from past reviews of this repo, and retain new ones, in " +
-        "<repo_root>/.argus/memory.jsonl. Disable for a review uninfluenced by prior runs.",
+      "On by default: recall lessons from past reviews of this repo, and retain new ones, " +
+        "in <repo_root>/.argus/memory.jsonl. Set false for a review uninfluenced by prior runs.",
     ),
 };
 
@@ -185,16 +183,8 @@ server.registerTool(
             ? new ArgusReasoning()
             : new OfflineReasoning();
 
-    // Persistent by default — ArgusMemory's built-in store is process-local,
-    // and an MCP server that reviews the same repo all day would otherwise
-    // relearn the same lessons on every call.
-    const store = args.memory ? new JsonlVectorDB(default_memory_path(repo_root)) : null;
-    const memory = store ? new ArgusMemory(new HierarchicalMemory(store)) : new ArgusMemory();
-    if (store?.last_error) {
-      console.error(`argus: memory degraded (${store.last_error})`);
-    }
-
-    const argus = new Argus({ reasoning, memory });
+    // Memory is on by default; Argus opens the repo's store itself.
+    const argus = new Argus({ reasoning });
     let outcome;
     try {
       outcome = await argus.review({
@@ -203,6 +193,7 @@ server.registerTool(
         repo_root,
         verify_with_tools: args.verify_with_tools,
         refine: args.refine,
+        remember: args.memory,
       });
     } catch (e) {
       return {
@@ -267,8 +258,8 @@ server.registerTool(
       files_discovered: p.files_discovered,
       files_selected: p.files_selected,
       selectivity: p.selectivity,
-      memory_recalled: argus.memory.trace.recalled.length,
-      memory_stored: argus.memory.trace.stored.length,
+      memory_recalled: (outcome.memory_meta.recalled as number) ?? 0,
+      memory_stored: (outcome.memory_meta.stored as number) ?? 0,
       reflection_iterations: r.iterations as number | undefined,
       reflection_converged: r.converged as boolean | undefined,
       audit_entries: (g.audit_entries as number) ?? 0,

@@ -28,6 +28,12 @@ export interface VectorDB {
     top_k?: number,
     filter?: MemorySearchFilter,
   ): Array<{ text: string; score: number }>;
+  /**
+   * Optional self-report — where the store lives, how much it holds, whether
+   * it is degraded. Surfaced as `memory_meta` so a caller can tell recall from
+   * amnesia without knowing which implementation is attached.
+   */
+  describe?(): Record<string, unknown>;
 }
 
 // ---------------------------------------------------------------------------
@@ -115,6 +121,10 @@ export class InMemoryVectorDB implements VectorDB {
       ? this._items.filter((r) => !r.project || r.project === filter.project)
       : this._items;
     return rank_by_overlap(pool, query, top_k).map((r) => ({ text: r.text, score: r.score }));
+  }
+
+  describe(): Record<string, unknown> {
+    return { store: "in-process", lessons: this._items.length };
   }
 }
 

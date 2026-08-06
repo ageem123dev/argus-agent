@@ -122,6 +122,15 @@ export class JsonlVectorDB implements VectorDB {
     return rank_by_overlap(pool, query, top_k);
   }
 
+  describe(): Record<string, unknown> {
+    return {
+      store: "jsonl",
+      file: this.file,
+      lessons: this.size,
+      ...(this.last_error ? { error: this.last_error } : {}),
+    };
+  }
+
   // -------------------------------------------------------------------------
   // Persistence
   // -------------------------------------------------------------------------

@@ -77,8 +77,8 @@ What this build adds on top:
 - The `agy` provider, durable run records, `argus init`, and the MCP server — none of
   which exist in the book build.
 - `new Argus()` is zero-config: governance, policy, and the guardrailed toolbox wire
-  themselves. Both entry points additionally wire a durable lesson store, so reviews
-  accumulate across sessions rather than starting blank (see [Memory](#memory)).
+  themselves, and memory is durable by default, so reviews accumulate lessons across
+  sessions rather than starting blank (see [Memory](#memory)).
 - Perception dedupes diff paths and follows TS/JS imports and configs, not just Python.
 - The COMPLEX reasoning tier uses `thinking: {type: "adaptive"}` (the chapter
   build carries the book's deprecated `budget_tokens` config verbatim).
@@ -160,11 +160,24 @@ lacked was a store that outlived the process: `ArgusMemory`'s default is
 that section was always empty. `after_review()` also stored `verdict.slice(0, 200)` —
 a truncated blob, not a lesson.
 
-Both entry points now wire [`JsonlVectorDB`](src/memory_store.mts) against
-`<repo_root>/.argus/memory.jsonl` (`--memory <file>` to redirect, `--no-memory` to
-disable; `memory: false` on the MCP tool). `new Argus()` on its own still defaults to
-the in-process store — persistence is a decision about where a repo's lessons live, so
-the entry point that knows the repo root makes it.
+Memory is now on in every path, with no configuration: `Argus.review()` opens
+[`JsonlVectorDB`](src/memory_store.mts) against `<repo_root>/.argus/memory.jsonl`
+itself, so `new Argus()` remembers exactly as the CLI and the MCP server do. The store
+resolves per review rather than in the constructor because it lives in the repo under
+review, and `repo_root` arrives with the request; stores are cached per path, so one
+agent reviewing several repos keeps their lessons apart.
+
+There is exactly one off switch, and it suppresses recall *and* retention whatever
+store is attached:
+
+| Surface | Off |
+| --- | --- |
+| CLI | `--no-memory` (`--memory <file>` relocates the store instead) |
+| MCP tool | `memory: false` |
+| API | `review({ ..., remember: false })` |
+
+Injecting `memory:` into the constructor relocates or replaces the store — it is not a
+way to switch memory off. `remember: false` is.
 
 **What gets stored is a generalization, not the finding.** `distill_lessons()` reduces
 each severity-tagged finding to the directory it landed in and the issue class it fell
@@ -235,18 +248,13 @@ partially saw.
 
 ```ts
 import {
-  Argus, ArgusMemory, HierarchicalMemory, JsonlVectorDB,
-  default_memory_path, OfflineReasoning,
+  Argus, ArgusMemory, HierarchicalMemory, JsonlVectorDB, OfflineReasoning,
 } from "argus-agent";
 
 const argus = new Argus();                                        // live reasoning
 const offline = new Argus({ reasoning: new OfflineReasoning() }); // no network
 
-// Lessons that outlive the process — what the CLI and MCP server wire by default.
-const remembering = new Argus({
-  memory: new ArgusMemory(new HierarchicalMemory(new JsonlVectorDB(default_memory_path(".")))),
-});
-
+// Memory is durable by default — this writes to <repo_root>/.argus/memory.jsonl.
 const outcome = await argus.review({ diff, project: "my-app", repo_root: "." });
 outcome.review?.verdict;        // the refined review text
 outcome.perception_trace;       // files discovered/selected, selectivity
@@ -255,6 +263,12 @@ outcome.reflection_meta;        // iterations, converged, final_score
 outcome.collaboration_meta;     // delegated?, parallel_calls, messages
 outcome.governance_meta;        // audit_entries, audit_chain_ok, current_trust
 outcome.action_log;             // guardrailed tool invocations
+
+// The one off switch — neither reads nor writes lessons:
+await argus.review({ diff, project: "my-app", repo_root: ".", remember: false });
+
+// Keep memory on, but somewhere else:
+new Argus({ memory: new ArgusMemory(new HierarchicalMemory(new JsonlVectorDB("/tmp/m.jsonl"))) });
 ```
 
 Every module is injectable (`new Argus({ governance, action, ... })`), so custom

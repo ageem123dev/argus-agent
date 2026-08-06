@@ -11,6 +11,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { after, describe, it } from "node:test";
 
+import { Argus } from "../src/argus.mjs";
 import {
   ArgusMemory,
   HierarchicalMemory,
@@ -19,6 +20,7 @@ import {
   tokenize,
 } from "../src/memory.mjs";
 import { JsonlVectorDB, default_memory_path } from "../src/memory_store.mjs";
+import { ReviewResult } from "../src/reasoning.mjs";
 
 const tmp_root = fs.mkdtempSync(path.join(os.tmpdir(), "argus-memory-"));
 after(() => fs.rmSync(tmp_root, { recursive: true, force: true }));
@@ -218,5 +220,110 @@ describe("ArgusMemory", () => {
 
   it("recalls nothing on a fresh in-memory store — the pre-existing behaviour", () => {
     assert.deepEqual(new ArgusMemory().before_review("app", "diff --git a/src/auth/x.mts"), []);
+  });
+});
+
+describe("Argus memory defaults", () => {
+  const DIFF = "diff --git a/src/auth/token.mts b/src/auth/token.mts\n+const c = jwt.decode(raw);\n";
+  const VERDICT =
+    "- **severity: high** `src/auth/token.mts:42` calls jwt.decode instead of jwt.verify.";
+
+  /** Records the prompt reasoning was handed, to prove recall reaches it. */
+  function stub() {
+    const seen: string[] = [];
+    return {
+      seen,
+      reasoning: {
+        async review(augmented: string) {
+          seen.push(augmented);
+          return new ReviewResult(VERDICT, [], 0.9, "moderate");
+        },
+      } as never,
+    };
+  }
+
+  function repo(): string {
+    counter += 1;
+    const dir = path.join(tmp_root, `repo-${counter}`);
+    fs.mkdirSync(dir, { recursive: true });
+    return dir;
+  }
+
+  const request = (repo_root: string, extra = {}) => ({
+    diff: DIFF,
+    project: "app",
+    repo_root,
+    verify_with_tools: false,
+    refine: false,
+    ...extra,
+  });
+
+  it("persists with no configuration at all — `new Argus()` remembers", async () => {
+    const root = repo();
+    const { reasoning } = stub();
+
+    const first = await new Argus({ reasoning }).review(request(root));
+    assert.equal(first.memory_meta.store, "jsonl");
+    assert.equal(first.memory_meta.stored, 1);
+    assert.ok(fs.existsSync(default_memory_path(root)));
+
+    // A separate agent, as the next invocation would be.
+    const { reasoning: r2, seen } = stub();
+    const second = await new Argus({ reasoning: r2 }).review(request(root));
+    assert.equal(second.memory_meta.recalled, 1);
+    assert.match(seen[0], /### Past lessons/);
+  });
+
+  it("is switched off only by remember: false, which writes nothing", async () => {
+    const root = repo();
+    const { reasoning, seen } = stub();
+    const argus = new Argus({ reasoning });
+
+    await argus.review(request(root)); // seed a lesson
+    const off = await argus.review(request(root, { remember: false }));
+
+    assert.deepEqual(off.memory_meta, { store: "disabled", recalled: 0, stored: 0 });
+    assert.doesNotMatch(seen[1], /### Past lessons/);
+    // The seeded lesson is still on disk — disabling recall must not erase it.
+    assert.equal(new JsonlVectorDB(default_memory_path(root)).size, 1);
+  });
+
+  it("retains nothing across reviews while disabled", async () => {
+    const root = repo();
+    const { reasoning, seen } = stub();
+    const argus = new Argus({ reasoning });
+
+    await argus.review(request(root, { remember: false }));
+    await argus.review(request(root, { remember: false }));
+
+    assert.doesNotMatch(seen[1], /### Past lessons/);
+    assert.ok(!fs.existsSync(default_memory_path(root)));
+  });
+
+  it("keeps two repos' lessons apart on one long-lived agent", async () => {
+    const [a, b] = [repo(), repo()];
+    const { reasoning, seen } = stub();
+    const argus = new Argus({ reasoning });
+
+    await argus.review(request(a));
+    const other = await argus.review(request(b));
+
+    assert.equal(other.memory_meta.recalled, 0);
+    assert.doesNotMatch(seen[1], /### Past lessons/);
+  });
+
+  it("lets an injected store override the location without disabling anything", async () => {
+    const root = repo();
+    const elsewhere = tmp_file();
+    const { reasoning } = stub();
+
+    const outcome = await new Argus({
+      reasoning,
+      memory: new ArgusMemory(new HierarchicalMemory(new JsonlVectorDB(elsewhere))),
+    }).review(request(root));
+
+    assert.equal(outcome.memory_meta.file, elsewhere);
+    assert.equal(outcome.memory_meta.stored, 1);
+    assert.ok(!fs.existsSync(default_memory_path(root)));
   });
 });

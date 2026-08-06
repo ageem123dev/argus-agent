@@ -16,7 +16,8 @@
  * them all.
  */
 import { gather_review_context, PerceptionTrace } from "./perception.mjs";
-import { ArgusMemory } from "./memory.mjs";
+import { ArgusMemory, HierarchicalMemory } from "./memory.mjs";
+import { JsonlVectorDB, default_memory_path } from "./memory_store.mjs";
 import { ArgusReasoning, ReviewResult } from "./reasoning.mjs";
 import { ArgusAction, ActionTrace } from "./action.mjs";
 import { ArgusReflection } from "./reflection.mjs";
@@ -42,6 +43,11 @@ export class ReviewOutcome {
 }
 
 export interface ArgusModules {
+  /**
+   * Overrides the durable store Argus would otherwise open under the repo —
+   * pass one to relocate memory, or `new ArgusMemory()` for a process-local
+   * one. To switch memory off for a review, use `remember: false` instead.
+   */
   memory?: ArgusMemory | null;
   reasoning?: ArgusReasoning | null;
   action?: ArgusAction | null;
@@ -58,6 +64,12 @@ export interface ReviewRequest {
   delegate_complex?: boolean;
   verify_with_tools?: boolean;
   refine?: boolean;
+  /**
+   * Recall lessons from past reviews of this repo, and retain new ones.
+   * On unless explicitly switched off — this is the only off switch, and it
+   * suppresses both directions, whatever store happens to be attached.
+   */
+  remember?: boolean;
 }
 
 /** The consolidated agent. `new Argus()` works with zero configuration. */
@@ -69,14 +81,48 @@ export class Argus {
   collaboration: ArgusCollaboration;
   governance: ArgusGovernance;
 
+  private _injected_memory: ArgusMemory | null;
+  private _memory_by_root = new Map<string, ArgusMemory>();
+
   constructor(modules: ArgusModules = {}) {
     // Each module is its own injectable class — composition, not inheritance.
+    this._injected_memory = modules.memory ?? null;
+    // Stands in until review() resolves the durable store; a caller reading
+    // .memory before the first review still gets a usable object.
     this.memory = modules.memory ?? new ArgusMemory();
     this.reasoning = modules.reasoning ?? new ArgusReasoning();
     this.action = modules.action ?? new ArgusAction();
     this.reflection = modules.reflection ?? new ArgusReflection();
     this.collaboration = modules.collaboration ?? new ArgusCollaboration();
     this.governance = modules.governance ?? new ArgusGovernance(TrustLevel.ACT_THEN_REVIEW);
+  }
+
+  /**
+   * The memory for a given repo. Resolved here rather than in the constructor
+   * because the store lives in the repo under review, and `repo_root` arrives
+   * with the request — which is why memory could not simply default to durable
+   * at construction time.
+   *
+   * Stores are cached per resolved path, so an instance reviewing the same repo
+   * repeatedly reads the file once, and one reviewing several repos keeps their
+   * lessons apart.
+   */
+  private _memory_for(repo_root: string, remember: boolean): ArgusMemory {
+    if (this._injected_memory) {
+      return this._injected_memory;
+    }
+    if (!remember) {
+      // Fresh and process-local: nothing to recall, and nothing it retains
+      // outlives this call — including across reviews on the same instance.
+      return new ArgusMemory();
+    }
+    const file = default_memory_path(repo_root);
+    let memory = this._memory_by_root.get(file);
+    if (!memory) {
+      memory = new ArgusMemory(new HierarchicalMemory(new JsonlVectorDB(file)));
+      this._memory_by_root.set(file, memory);
+    }
+    return memory;
   }
 
   async review(request: ReviewRequest): Promise<ReviewOutcome> {
@@ -86,6 +132,8 @@ export class Argus {
     const delegate_complex = request.delegate_complex ?? true;
     const verify_with_tools = request.verify_with_tools ?? true;
     const refine = request.refine ?? true;
+    const remember = request.remember ?? true;
+    this.memory = this._memory_for(repo_root, remember);
 
     // 1. governance — is this review allowed at all?
     const auth = this.governance.authorize("perceive", Capability.READ_FILES, { repo: repo_root });
@@ -100,7 +148,9 @@ export class Argus {
     const [selected, p_trace] = gather_review_context(diff, repo_root, budget);
 
     // 3. memory (before) — recall prior lessons
-    const past_lessons = this.memory.before_review(project, diff.slice(0, 300).replaceAll("\n", " "));
+    const past_lessons = remember
+      ? this.memory.before_review(project, diff.slice(0, 300).replaceAll("\n", " "))
+      : [];
 
     // 4. collaboration — fan out to sub-agents on complex diffs
     let collab_meta: Record<string, unknown> = { delegated: false };
@@ -180,12 +230,15 @@ export class Argus {
     // The full verdict, not a truncation: ArgusMemory distills it into
     // generalizations, and a verdict cut at 200 chars usually loses the
     // finding that was worth generalizing from.
-    const stored = this.memory.after_review(result.verdict, project);
-    const memory_meta = {
-      store: this.memory.trace.store,
-      recalled: past_lessons.length,
-      stored: stored.length,
-    };
+    const stored = remember ? this.memory.after_review(result.verdict, project) : [];
+    const store = this.memory.memory.vector_db;
+    const memory_meta = remember
+      ? {
+          ...(store.describe?.() ?? { store: this.memory.trace.store }),
+          recalled: past_lessons.length,
+          stored: stored.length,
+        }
+      : { store: "disabled", recalled: 0, stored: 0 };
 
     // 9. governance — close audit chain
     const [chain_ok, chain_len] = this.governance.audit.verify_chain();
