@@ -6,6 +6,7 @@
 //           [--offline] [--no-tools] [--no-refine]
 //           [--record <file>] [--no-record]
 //           [--memory <file>] [--no-memory]
+//           [--commit <sha>]   commit this diff is of; defaults to HEAD
 //
 //     argus ingest [--repo <path>] [--from <file|dir>] [--severities critical,major]
 //                  [--commit <sha>] [--dry-run]
@@ -109,7 +110,7 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
         `                 [--provider ${PROVIDERS.join("|")}]\n` +
         "                 [--offline] [--no-tools] [--no-refine]\n" +
         "                 [--record <file>] [--no-record]\n" +
-        "                 [--memory <file>] [--no-memory]\n" +
+        "                 [--memory <file>] [--no-memory] [--commit <sha>]\n" +
         "       argus init [repo] [--force]   scaffold Claude Code integration\n" +
         "       argus ingest [--repo <path>] [--from <file|dir>]\n" +
         "                 [--severities critical,major] [--commit <sha>] [--dry-run]\n" +
@@ -241,7 +242,10 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
     const record = build_run_record(outcome, {
       project,
       repo_root,
-      commit: resolve_commit(repo_root),
+      // --commit names the commit this diff is *of*. Without it a review of a
+      // historical diff records whatever HEAD happens to be, which then joins
+      // to the wrong review during ingestion — or to none at all.
+      commit: (values.commit as string | undefined) ?? resolve_commit(repo_root),
       provider,
       invoked_via: "cli",
       calls: agy_calls,
