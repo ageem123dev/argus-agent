@@ -65,8 +65,35 @@ export const TOPICS: Array<[string, RegExp]> = [
   ["performance", /\b(quadratic|slow\w*|bottlenecks?|perf)\b/i],
 ];
 
-const PATH_RE =
-  /\b((?:[\w.-]+[/\\])+[\w.-]+\.(?:m?[jt]sx?|py|go|rs|rb|java|cs|php|sql|ya?ml|json|sh|c|h|cpp|hpp))\b/;
+/**
+ * Extensions recognizable without a directory to corroborate them. Needed
+ * because a bare filename is otherwise indistinguishable from prose that has
+ * lost a space after a full stop — "…in workspaceStorage.The next step…" reads
+ * as a path unless the extension is one we know.
+ */
+const KNOWN_EXTENSIONS =
+  "m?[jt]sx?|c[jt]s|py|go|rs|rb|java|kt|cs|php|swift|scala|dart|lua|sql|ya?ml|" +
+  "json|toml|ini|cfg|xml|css|s[ac]ss|html?|vue|svelte|sh|bash|ps1|c|h|cpp|hpp|" +
+  "md|mdx|txt|lock";
+
+/**
+ * A cited file path.
+ *
+ * Two alternatives. With a directory component, any plausible extension is
+ * accepted — the slash is corroboration enough, and an explicit extension list
+ * silently dropped every finding in a `.md`, `.yml` or `.toml` file. Without
+ * one, only known extensions count.
+ *
+ * Deliberately not `\b`-anchored at the start: a word boundary cannot precede
+ * a leading dot, so anchoring made `.claude/skills/x.md` parse as
+ * `claude/skills/x.md`. Argus's own findings then never matched another
+ * reviewer's, which cite the path in full — every dotfile-directory finding
+ * counted as a miss.
+ */
+const PATH_RE = new RegExp(
+  "((?:[\\w.-]+[/\\\\])+[\\w.-]+\\.[A-Za-z][A-Za-z0-9]{0,9}" +
+    `|[\\w.-]+\\.(?:${KNOWN_EXTENSIONS}))\\b`,
+);
 
 /** `path:line` or `path:line:col`, as most reviewers cite a location. */
 const PATH_LINE_RE = new RegExp(PATH_RE.source + "(?::(\\d+))?");
@@ -143,30 +170,65 @@ export function make_finding(
 }
 
 /**
+ * How a finding line announces its severity.
+ *
+ * Two forms, because the providers genuinely differ and neither is prompted
+ * into a schema. The Anthropic path tends to write "severity: high"; the agy
+ * path writes a bracketed tag, "- **[high]** path:line — claim". Matching only
+ * the first silently found zero findings in every agy review, which at
+ * ingestion time made everything the other reviewer found look like a miss —
+ * including the findings Argus had itself reported.
+ */
+const FINDING_LINE_RE = new RegExp(
+  `(severity)|(\\[\\s*(?:${Object.keys(SEVERITY_WEIGHT).join("|")})\\s*\\])`,
+  "i",
+);
+
+/**
  * Parse findings out of review prose — Argus's own verdict format.
  *
  * Line-based and severity-anchored, because that is the only structure the
  * verdict reliably has: the reasoning layer is prompted for severity-tagged
- * findings but not for a schema. Lines without a severity marker are prose,
- * not findings, and are skipped rather than guessed at.
+ * findings but not for a schema. Lines with no severity marker are prose, not
+ * findings, and are skipped rather than guessed at.
  */
 export function parse_findings(text: string, source = "argus"): Finding[] {
   const findings: Finding[] = [];
+  const by_location = new Map<string, Finding>();
+
   for (const raw of String(text).split("\n")) {
     const line = strip_markdown(raw);
-    if (!line || !/severity/i.test(line)) {
+    if (!line || !FINDING_LINE_RE.test(line)) {
       continue;
     }
     const location = PATH_LINE_RE.exec(line);
-    findings.push(
-      make_finding({
-        source,
-        path: location?.[1],
-        line: location?.[2] ? Number(location[2]) : undefined,
-        severity: SEVERITY_RE.exec(line)?.[1],
-        title: line,
-      }),
-    );
+    const finding = make_finding({
+      source,
+      path: location?.[1],
+      line: location?.[2] ? Number(location[2]) : undefined,
+      severity: SEVERITY_RE.exec(line)?.[1],
+      title: line,
+    });
+
+    // A verdict routinely states each finding twice: once in the model's prose
+    // summary ("High Severity Queue Starvation (path:221)") and again in the
+    // structured list ("**[high]** path:221 — …"). Same file and line is one
+    // finding restated, and counting both inflates how much the agent appears
+    // to have found — which then skews every ingestion ratio built on it.
+    // Findings with no location cannot be told apart, so they are all kept.
+    const key = finding.path && finding.line != null ? `${finding.path}:${finding.line}` : null;
+    if (key) {
+      const prior = by_location.get(key);
+      if (prior) {
+        // The two statements can disagree on severity; keep the graver reading.
+        if (severity_weight(finding.severity) > severity_weight(prior.severity)) {
+          prior.severity = finding.severity;
+        }
+        continue;
+      }
+      by_location.set(key, finding);
+    }
+    findings.push(finding);
   }
   return findings;
 }

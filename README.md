@@ -97,6 +97,15 @@ What this build adds on top:
 node dist/cli.mjs my-change.diff --project my-app --repo /path/to/repo
 ```
 
+Reviewing a diff that isn't `HEAD` — a past commit, or a range — needs `--commit
+<sha>` to name what the diff is *of*. Without it the run record claims whatever
+`HEAD` happens to be, and ingestion then joins it to the wrong review, or to none:
+
+```sh
+git -C repo diff <base>..<head> > change.diff
+node dist/cli.mjs change.diff --repo repo --commit <head>
+```
+
 ## Reasoning providers
 
 `--provider` selects what backs the reasoning layer. `auto` (the default) prefers

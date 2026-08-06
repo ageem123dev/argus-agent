@@ -405,6 +405,20 @@ describe("run_ingest", () => {
     assert.equal(result.written, 0);
   });
 
+  it("refuses to score a run whose verdict is empty", () => {
+    // Seen live: an agy call returned successfully with no verdict text. Scored
+    // naively that reads as recall=0%, and writes every one of the other
+    // reviewer's findings into memory as an Argus miss.
+    const { repo, store } = fixture("   \n  ");
+    const result = run(repo, store);
+
+    assert.match(result.reviews[0].skipped_reason!, /empty verdict/);
+    assert.equal(result.reviews[0].matched_run, undefined);
+    assert.equal(result.reviews[0].lessons.length, 0);
+    assert.equal(result.written, 0);
+    assert.ok(!fs.existsSync(default_memory_path(repo)));
+  });
+
   it("writes nothing on a dry run", () => {
     const { repo, store } = fixture("- severity: low `src/perf/loop.mts` quadratic scan");
     const result = run(repo, store, { dry_run: true });

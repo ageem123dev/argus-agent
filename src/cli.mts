@@ -194,6 +194,14 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
 
   const review = outcome.review!;
   const p_trace = outcome.perception_trace!;
+  // A provider can return successfully and still yield nothing. Silence here
+  // reads as "clean diff" when it means "the review did not happen".
+  if (!review.verdict.trim()) {
+    console.error(
+      `warning: provider "${provider}" returned an empty verdict — this is a failed review, ` +
+        "not a clean one. Re-run before relying on it or ingesting against it.",
+    );
+  }
   // routing_tier (what picked the model) is reported separately from complexity
   // (what the model thought of the change) — they routinely disagree.
   const tier = review.routing_tier ? `, tier=${review.routing_tier}` : "";

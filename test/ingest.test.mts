@@ -51,8 +51,91 @@ describe("findings", () => {
     assert.equal(f.topic, "authentication and token handling");
   });
 
+  it("parses the agy provider's bracketed severity tags", () => {
+    // The real shape of an agy verdict. Requiring the literal word "severity"
+    // found nothing here, so every agy review compared as zero findings and
+    // ingestion counted its own catches as misses.
+    const verdict = [
+      "## Findings",
+      "- **[high]** .claude/skills/ship/SKILL.md:75 — reads review state from globalStorage.",
+      "  ↳ Update the storage path to workspaceStorage.",
+      "- **[medium]** src/auth/token.mts:76 — the token signature is never verified.",
+    ].join("\n");
+
+    const found = parse_findings(verdict);
+    assert.equal(found.length, 2);
+    assert.deepEqual(
+      found.map((f) => [f.severity, f.path, f.line]),
+      [
+        ["high", ".claude/skills/ship/SKILL.md", 75],
+        ["medium", "src/auth/token.mts", 76],
+      ],
+    );
+  });
+
   it("skips prose that carries no severity marker", () => {
     assert.deepEqual(parse_findings("## Findings\n\nThe diff looks broadly fine.\n"), []);
+    // A bracketed word that is not a severity is prose, not a finding.
+    assert.deepEqual(parse_findings("- see [note] in src/a.mts:3 for context"), []);
+  });
+
+  it("keeps a dotfile directory intact, so both reviewers cite the same path", () => {
+    // Anchoring the path on \b dropped the leading dot, and the resulting
+    // "claude/skills/..." never matched CodeRabbit's ".claude/skills/...".
+    const [f] = parse_findings("- **[high]** .claude/skills/ship/SKILL.md:75 — stale review.");
+    assert.equal(f.path, ".claude/skills/ship/SKILL.md");
+    assert.equal(f.locus, ".claude/skills/ship/**");
+  });
+
+  it("recognizes files an explicit code-extension list would miss", () => {
+    const cited = (line: string) => parse_findings(`- severity: low ${line}`)[0]?.path;
+    assert.equal(cited("`.gitlab-ci.yml` has a stale comment"), ".gitlab-ci.yml");
+    assert.equal(cited("`docs/adr/0004-caching.md` is out of date"), "docs/adr/0004-caching.md");
+    assert.equal(cited("`pyproject.toml` pins an old version"), "pyproject.toml");
+  });
+
+  it("counts a finding once when the verdict states it twice", () => {
+    // The real shape of an agy verdict: a prose summary that says "High
+    // Severity …(path:221)", then the structured list repeating it. Parsing
+    // both doubled Argus's apparent finding count and skewed every ratio.
+    const verdict = [
+      "### Key Findings",
+      "1. **High Severity Queue Starvation (`app/api/purge/route.ts:221`)**: the batch query…",
+      "2. **Medium Severity Purge Omission (`app/api/purge/route.ts:224`)**: filtering excludes…",
+      "## Findings",
+      "- **[high]** app/api/purge/route.ts:221 — the purge batch query starves the queue.",
+      "- **[medium]** app/api/purge/route.ts:224 — the filter excludes rows it should keep.",
+    ].join("\n");
+
+    const found = parse_findings(verdict);
+    assert.deepEqual(
+      found.map((f) => `${f.path}:${f.line}`),
+      ["app/api/purge/route.ts:221", "app/api/purge/route.ts:224"],
+    );
+  });
+
+  it("keeps the graver severity when the two statements disagree", () => {
+    const verdict = [
+      "- severity: low src/a.mts:10 — the summary underplays it.",
+      "- **[critical]** src/a.mts:10 — the structured list is graver.",
+    ].join("\n");
+    assert.deepEqual(
+      parse_findings(verdict).map((f) => f.severity),
+      ["critical"],
+    );
+  });
+
+  it("keeps unlocated findings apart, having no way to tell them apart", () => {
+    const verdict = "- severity: high something vague\n- severity: high something else vague";
+    assert.equal(parse_findings(verdict).length, 2);
+  });
+
+  it("does not read a missing space after a full stop as a filename", () => {
+    assert.equal(
+      parse_findings("- severity: low state lives in workspaceStorage.The next step is unclear")[0]
+        ?.path,
+      undefined,
+    );
   });
 
   it("normalizes diff-header and windows paths to one repo-relative form", () => {

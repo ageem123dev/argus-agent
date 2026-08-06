@@ -132,6 +132,19 @@ export function run_ingest(opts: IngestRunOptions): IngestRunResult {
     }
     entry.matched_run = { commit: run.commit, project: run.project, timestamp: run.timestamp };
 
+    // An empty verdict is a review that failed to produce output, not a review
+    // that found nothing. Scoring it would report recall=0% and write every one
+    // of the other reviewer's findings into memory as an Argus miss — blaming
+    // the agent for a run that never happened, and poisoning future recall with
+    // lessons drawn from a broken comparison.
+    if (!run.verdict?.trim()) {
+      entry.matched_run = undefined;
+      entry.skipped_reason =
+        `the Argus run for ${commit.slice(0, 8)} recorded an empty verdict ` +
+        `(provider "${run.provider ?? "?"}" produced no output) — re-run the review before ingesting`;
+      continue;
+    }
+
     const outcome = ingest_findings(
       parse_findings(run.verdict ?? "", "argus"),
       review.findings,
