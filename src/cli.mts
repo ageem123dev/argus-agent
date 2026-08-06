@@ -95,7 +95,11 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
       memory_file: values.memory as string | undefined,
     });
     console.log(format_ingest_report(report));
-    return report.paths.length ? 0 : 1;
+    // Non-zero for a misconfiguration only. An existing store with nothing in
+    // it yet is a legitimate no-op, not a failure.
+    const unusable =
+      !report.paths.length || report.missing_paths.length === report.paths.length;
+    return unusable ? 1 : 0;
   }
 
   const diff_file = positionals[0];

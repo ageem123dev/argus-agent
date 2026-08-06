@@ -229,6 +229,23 @@ node dist/cli.mjs ingest --repo /path/to/repo --dry-run   # compare, write nothi
 node dist/cli.mjs ingest --repo /path/to/repo             # and learn from the misses
 ```
 
+The MCP server exposes this as **`argus_ingest`**, separate from `argus_review`,
+so an agent can invoke it on its own schedule. The two run on different clocks:
+a review happens while you are writing the change, ingestion happens after
+CodeRabbit has been over the same commit. Folding ingestion into review would
+make every review wait on a second reviewer that has usually not run yet.
+
+`argus_ingest` takes `repo_root`, `project`, `dry_run`, and — rarely needed, since
+they normally come from config — `from`, `severities`, and `commit`. It returns the
+same report as text plus a typed block: per-set totals, `recall`, `confirmed_rate`,
+`lessons_written`, `filtered_out`, and a `skipped` list giving a reason per unusable
+review, so a null result is always explainable.
+
+It reports a tool **error** when the store is missing or a configured path does not
+exist, and success when the store is merely empty. Both produce zero lessons, but
+only one is a misconfiguration — and a broken path must not read as "Argus missed
+nothing".
+
 Only `missed` becomes memory. Argus-only findings are deliberately *not* fed
 back — reinforcing a reviewer's own unconfirmed findings is how it talks itself
 into its false positives. `confirmed%` in the report is a **floor** on precision,
@@ -301,15 +318,16 @@ hardcoded — relative when Argus lives inside the target repo, absolute when it
 the review, and hands the output back for cross-checking. Extra flags pass straight
 through (`/argus-review --project my-app --no-refine`).
 
-**Autonomously — MCP server.** [`src/mcp.mts`](src/mcp.mts) exposes `argus_review` over
-stdio, so a calling agent can reach for a review mid-task. `init` registers it; by hand
-it would be:
+**Autonomously — MCP server.** [`src/mcp.mts`](src/mcp.mts) exposes two tools over
+stdio — `argus_review` to review a diff, and `argus_ingest` to learn from CodeRabbit's
+review of the same commit (see [above](#learning-from-a-second-reviewer)) — so a calling
+agent can reach for either mid-task. `init` registers the server; by hand it would be:
 
 ```sh
 claude mcp add argus -- node /path/to/argus-agent-ts/dist/mcp.mjs
 ```
 
-The tool takes `diff` (inline), `diff_file`, or `git_range` (default `HEAD`, and
+`argus_review` takes `diff` (inline), `diff_file`, or `git_range` (default `HEAD`, and
 `--staged` works), plus `repo_root`, `project`, `provider`, `refine`,
 `verify_with_tools`, `record`, and `memory`. It returns the review as text and a typed
 `structuredContent` block — verdict, complexity, confidence, perception selectivity,

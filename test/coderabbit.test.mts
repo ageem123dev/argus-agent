@@ -18,7 +18,7 @@ import {
   resolve_coderabbit_paths,
 } from "../src/adapters/coderabbit.mjs";
 import { DEFAULT_SEVERITIES, load_config, parse_severities } from "../src/config.mjs";
-import { run_ingest } from "../src/ingest_run.mjs";
+import { format_ingest_report, run_ingest } from "../src/ingest_run.mjs";
 import { JsonlVectorDB, default_memory_path } from "../src/memory_store.mjs";
 import { default_record_path } from "../src/run_record.mjs";
 
@@ -378,5 +378,18 @@ describe("run_ingest", () => {
     const result = run(repo, path.join(tmp_root, "nowhere"));
     assert.deepEqual(result.reviews, []);
     assert.equal(result.written, 0);
+  });
+
+  it("distinguishes a path that is not there from a store with nothing in it", () => {
+    // Both yield zero lessons, but only one is a misconfiguration — and a
+    // misconfiguration must not read as "Argus missed nothing".
+    const { repo } = fixture("");
+    const absent = run(repo, path.join(tmp_root, "nowhere"));
+    assert.equal(absent.missing_paths.length, 1);
+    assert.match(format_ingest_report(absent), /does not exist/);
+
+    const empty = run(repo, scratch("empty-store"));
+    assert.deepEqual(empty.missing_paths, []);
+    assert.match(format_ingest_report(empty), /no completed reviews yet/);
   });
 });

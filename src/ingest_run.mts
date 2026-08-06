@@ -10,6 +10,8 @@
  * CodeRabbit finding as a miss would flood memory with lessons Argus never had
  * a chance to learn.
  */
+import * as fs from "node:fs";
+
 import { load_reviews, resolve_coderabbit_paths, type LoadedReview } from "./adapters/coderabbit.mjs";
 import { load_config, type ArgusConfig } from "./config.mjs";
 import { parse_findings } from "./findings.mjs";
@@ -50,6 +52,14 @@ export interface IngestRunResult {
   /** Where reviews were read from, and whether that was discovered or configured. */
   paths: string[];
   discovered: boolean;
+  /**
+   * Configured paths that do not exist. Kept separate from "found no reviews":
+   * a store that exists and is empty means CodeRabbit has not reviewed yet,
+   * which is a legitimate null result, while a path that is not there is a
+   * misconfiguration. Reporting both as "0 misses" would let a broken setup
+   * read as a clean bill of health.
+   */
+  missing_paths: string[];
   reviews: ReviewIngestResult[];
   /** Findings dropped by the severity filter across all reviews. */
   filtered_out: number;
@@ -77,6 +87,7 @@ export function run_ingest(opts: IngestRunOptions): IngestRunResult {
     config_problems: problems,
     paths,
     discovered,
+    missing_paths: paths.filter((p) => !fs.existsSync(p)),
     reviews: [],
     filtered_out: 0,
     written: 0,
@@ -165,10 +176,19 @@ export function format_ingest_report(r: IngestRunResult): string {
     return lines.join("\n");
   }
   for (const p of r.paths) {
-    lines.push(`  ${r.discovered ? "discovered" : "configured"}: ${p}`);
+    const missing = r.missing_paths.includes(p) ? "  (does not exist)" : "";
+    lines.push(`  ${r.discovered ? "discovered" : "configured"}: ${p}${missing}`);
+  }
+  if (r.missing_paths.length === r.paths.length) {
+    lines.push(
+      "  that path does not exist — check ingest.coderabbit.path, ARGUS_CODERABBIT_PATH, or --from.",
+      "  Note the filename under coderabbit.coderabbit-vscode/ is a content hash that changes",
+      "  per review; point at the directory, not at one file.",
+    );
+    return lines.join("\n");
   }
   if (!r.reviews.length) {
-    lines.push("  no completed reviews found there.");
+    lines.push("  the store is there but holds no completed reviews yet.");
     return lines.join("\n");
   }
 
