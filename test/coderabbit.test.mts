@@ -10,6 +10,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { after, describe, it } from "node:test";
+import { pathToFileURL } from "node:url";
 
 import {
   discover_coderabbit_dirs,
@@ -264,31 +265,80 @@ describe("configuration", () => {
 });
 
 describe("discovery", () => {
-  it("finds the workspace whose categories.json names this repo", () => {
+  /** A workspaceStorage tree, with each workspace declared as VS Code declares it. */
+  function storage(
+    workspaces: Array<{ hash: string; folder?: string; categories?: Record<string, string> }>,
+  ): string {
     const appdata = scratch("appdata");
-    const repo = "C:\\Users\\someone\\repos\\my-app";
-    const storage = path.join(appdata, "Code", "User", "workspaceStorage");
+    const root = path.join(appdata, "Code", "User", "workspaceStorage");
+    for (const ws of workspaces) {
+      const dir = path.join(root, ws.hash);
+      fs.mkdirSync(path.join(dir, "coderabbit.coderabbit-vscode"), { recursive: true });
+      if (ws.folder) {
+        fs.writeFileSync(
+          path.join(dir, "workspace.json"),
+          JSON.stringify({ folder: pathToFileURL(ws.folder).href }),
+          "utf-8",
+        );
+      }
+      if (ws.categories) {
+        fs.writeFileSync(
+          path.join(dir, "coderabbit.coderabbit-vscode", "categories.json"),
+          JSON.stringify(ws.categories),
+          "utf-8",
+        );
+      }
+    }
+    return appdata;
+  }
 
-    const mine = path.join(storage, "4ad3dbf8", "coderabbit.coderabbit-vscode");
-    fs.mkdirSync(mine, { recursive: true });
-    // Keys arrive JSON-escaped, as the extension writes them.
-    fs.writeFileSync(
-      path.join(mine, "categories.json"),
-      JSON.stringify({ [`${repo}-reviewType`]: "review" }),
-      "utf-8",
-    );
+  const repo = (name: string) => path.join(tmp_root, "checkouts", name);
 
-    const theirs = path.join(storage, "fa4a0def", "coderabbit.coderabbit-vscode");
-    fs.mkdirSync(theirs, { recursive: true });
-    fs.writeFileSync(
-      path.join(theirs, "categories.json"),
-      JSON.stringify({ "C:\\other\\repo-reviewType": "review" }),
-      "utf-8",
-    );
-
-    const found = discover_coderabbit_dirs(repo, { APPDATA: appdata });
+  it("identifies a workspace by VS Code's own folder metadata", () => {
+    const appdata = storage([
+      { hash: "aaaa", folder: repo("my-app") },
+      { hash: "bbbb", folder: repo("other") },
+    ]);
+    const found = discover_coderabbit_dirs(repo("my-app"), { APPDATA: appdata });
     assert.equal(found.length, 1);
-    assert.ok(found[0].includes("4ad3dbf8"));
+    assert.ok(found[0].includes("aaaa"));
+  });
+
+  it("does not match a repo whose path is a prefix of another's", () => {
+    // The live case this was written for: repos/argus and repos/argus-agent
+    // both exist, and substring matching had the first discovering the
+    // second's reviews — ingesting another project's findings into its memory.
+    const appdata = storage([{ hash: "aaaa", folder: repo("argus-agent") }]);
+    assert.deepEqual(discover_coderabbit_dirs(repo("argus"), { APPDATA: appdata }), []);
+    assert.equal(discover_coderabbit_dirs(repo("argus-agent"), { APPDATA: appdata }).length, 1);
+  });
+
+  it("finds a workspace that has storage but no reviews yet", () => {
+    // Also live: CodeRabbit creates its directory before the first review, and
+    // categories.json then names no repo. Missing that reports "no store
+    // found" for a workspace that is set up and simply idle.
+    const appdata = storage([
+      { hash: "aaaa", folder: repo("my-app"), categories: { "default-reviewType": "review" } },
+    ]);
+    assert.equal(discover_coderabbit_dirs(repo("my-app"), { APPDATA: appdata }).length, 1);
+  });
+
+  it("falls back to whole categories keys when workspace.json is absent", () => {
+    const appdata = storage([
+      { hash: "aaaa", categories: { [`${repo("my-app")}-reviewType`]: "review" } },
+      { hash: "bbbb", categories: { [`${repo("my-app-two")}-reviewType`]: "review" } },
+    ]);
+    const found = discover_coderabbit_dirs(repo("my-app"), { APPDATA: appdata });
+    assert.equal(found.length, 1);
+    assert.ok(found[0].includes("aaaa"));
+  });
+
+  it("ignores a workspace with no CodeRabbit directory at all", () => {
+    const appdata = scratch("appdata");
+    fs.mkdirSync(path.join(appdata, "Code", "User", "workspaceStorage", "cccc"), {
+      recursive: true,
+    });
+    assert.deepEqual(discover_coderabbit_dirs(repo("my-app"), { APPDATA: appdata }), []);
   });
 
   it("prefers configuration over discovery, and never searches when set", () => {

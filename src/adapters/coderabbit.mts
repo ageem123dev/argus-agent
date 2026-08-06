@@ -23,6 +23,7 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { fileURLToPath } from "node:url";
 
 import { make_finding, strip_markdown, type Finding } from "../findings.mjs";
 import type { FindingsAdapter } from "../ingest.mjs";
@@ -223,19 +224,65 @@ export function workspace_storage_roots(env: NodeJS.ProcessEnv = process.env): s
   );
 }
 
+/** Path comparison that matches the filesystem's own case rules. */
+function same_path(a: string, b: string): boolean {
+  return process.platform === "win32"
+    ? a.toLowerCase() === b.toLowerCase()
+    : a === b;
+}
+
+/**
+ * The checkout a workspace directory belongs to, from VS Code's own metadata.
+ *
+ * `workspace.json` holds the folder as a file: URI — authoritative, and exact.
+ * Multi-root workspaces record a `workspace` key pointing at a .code-workspace
+ * file instead, which names no single folder; those are skipped.
+ */
+function workspace_folder(workspace_dir: string): string | undefined {
+  try {
+    const meta = JSON.parse(fs.readFileSync(path.join(workspace_dir, "workspace.json"), "utf-8"));
+    return typeof meta?.folder === "string"
+      ? path.resolve(fileURLToPath(meta.folder))
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Fallback for a workspace with no workspace.json.
+ *
+ * The extension's `categories.json` keys are `<repo-root>-<setting>`, so the
+ * repo can be recovered from them — but only by comparing whole keys. Testing
+ * whether the file *contains* the repo path silently matches any repo whose
+ * path is a prefix of another: on a machine holding both `repos/argus` and
+ * `repos/argus-agent`, the first would discover the second's reviews and
+ * ingest another project's findings into its memory.
+ */
+function categories_name_repo(dir: string, repo_root: string): boolean {
+  let keys: string[];
+  try {
+    keys = Object.keys(JSON.parse(fs.readFileSync(path.join(dir, "categories.json"), "utf-8")));
+  } catch {
+    return false;
+  }
+  return keys.some((key) => {
+    const cut = key.lastIndexOf("-");
+    return cut > 0 && same_path(key.slice(0, cut), repo_root);
+  });
+}
+
 /**
  * Best-effort discovery of the CodeRabbit directory for a repo.
  *
- * The extension's `categories.json` keys are prefixed with the absolute repo
- * path, which is the only link from a workspace hash back to a checkout. This
- * is a convenience for an unconfigured first run, not a contract — configure
+ * A convenience for an unconfigured first run, not a contract — configure
  * `ingest.coderabbit.path` and none of it runs.
  */
 export function discover_coderabbit_dirs(
   repo_root: string,
   env: NodeJS.ProcessEnv = process.env,
 ): string[] {
-  const wanted = path.resolve(repo_root).toLowerCase();
+  const wanted = path.resolve(repo_root);
   const found: string[] = [];
 
   for (const root of workspace_storage_roots(env)) {
@@ -246,17 +293,14 @@ export function discover_coderabbit_dirs(
       continue;
     }
     for (const workspace of workspaces) {
-      const dir = path.join(root, workspace, "coderabbit.coderabbit-vscode");
-      let categories: string;
-      try {
-        categories = fs.readFileSync(path.join(dir, "categories.json"), "utf-8");
-      } catch {
+      const workspace_dir = path.join(root, workspace);
+      const dir = path.join(workspace_dir, "coderabbit.coderabbit-vscode");
+      if (!fs.existsSync(dir)) {
         continue;
       }
-      // Windows paths appear JSON-escaped in the keys; compare on the raw text
-      // rather than reconstructing each key.
-      const haystack = categories.toLowerCase().replaceAll("\\\\", "\\");
-      if (haystack.includes(wanted)) {
+      const folder = workspace_folder(workspace_dir);
+      const matches = folder ? same_path(folder, wanted) : categories_name_repo(dir, wanted);
+      if (matches) {
         found.push(dir);
       }
     }
