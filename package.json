@@ -1,0 +1,32 @@
+{
+  "name": "argus-agent",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Argus — an autonomous code-review agent, reasoning via the Google agy CLI, exposed to Claude Code as a slash command and an MCP server.",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=18"
+  },
+  "bin": {
+    "argus": "dist/cli.mjs",
+    "argus-mcp": "dist/mcp.mjs"
+  },
+  "scripts": {
+    "build": "tsc && node -e \"require('fs').cpSync('src/examples','dist/examples',{recursive:true})\"",
+    "prepare": "tsc && node -e \"require('fs').cpSync('src/examples','dist/examples',{recursive:true})\"",
+    "review": "node dist/cli.mjs",
+    "mcp": "node dist/mcp.mjs",
+    "demo": "node dist/cli.mjs dist/examples/sample.diff --project argus-self-review --offline"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.60.0",
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.5.0"
+  }
+}

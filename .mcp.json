@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "argus": {
+      "command": "node",
+      "args": [
+        "dist/mcp.mjs"
+      ]
+    }
+  }
+}

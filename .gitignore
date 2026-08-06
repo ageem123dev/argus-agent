@@ -1,0 +1,7 @@
+node_modules/
+dist/
+.argus/
+.env
+.DS_Store
+.vscode/
+.idea/
