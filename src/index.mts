@@ -19,6 +19,7 @@ export {
   build_run_record,
   append_run_record,
   default_record_path,
+  resolve_commit,
 } from "./run_record.mjs";
 export type { RunRecord, RunRecordContext } from "./run_record.mjs";
 export { Argus, ReviewOutcome } from "./argus.mjs";
@@ -31,8 +32,14 @@ export {
   InMemoryVectorDB,
   MemoryEntry,
   MemoryTier,
+  distill_lessons,
+  rank_by_overlap,
+  score_overlap,
+  tokenize,
 } from "./memory.mjs";
-export type { VectorDB } from "./memory.mjs";
+export type { DistilledLesson, MemorySearchFilter, MemoryTrace, VectorDB } from "./memory.mjs";
+export { JsonlVectorDB, default_memory_path } from "./memory_store.mjs";
+export type { MemoryRecord, JsonlVectorDBOptions } from "./memory_store.mjs";
 export {
   ArgusReasoning,
   OfflineReasoning,

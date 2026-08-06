@@ -26,6 +26,7 @@ import { ArgusGovernance, Capability, TrustLevel } from "./governance.mjs";
 /** One per review — gathers every cognitive trace. */
 export class ReviewOutcome {
   action_log: ActionTrace[] = [];
+  memory_meta: Record<string, unknown> = {};
   reflection_meta: Record<string, unknown> = {};
   collaboration_meta: Record<string, unknown> = {};
   governance_meta: Record<string, unknown> = {};
@@ -176,7 +177,15 @@ export class Argus {
       `review:${project}`,
       (reflection_meta.converged as boolean) ?? true,
     );
-    this.memory.after_review(result.verdict.slice(0, 200), project);
+    // The full verdict, not a truncation: ArgusMemory distills it into
+    // generalizations, and a verdict cut at 200 chars usually loses the
+    // finding that was worth generalizing from.
+    const stored = this.memory.after_review(result.verdict, project);
+    const memory_meta = {
+      store: this.memory.trace.store,
+      recalled: past_lessons.length,
+      stored: stored.length,
+    };
 
     // 9. governance — close audit chain
     const [chain_ok, chain_len] = this.governance.audit.verify_chain();
@@ -191,6 +200,7 @@ export class Argus {
 
     return new ReviewOutcome(result, p_trace, {
       action_log: this.action.action_log,
+      memory_meta,
       reflection_meta,
       collaboration_meta: collab_meta,
       governance_meta,

@@ -18,6 +18,8 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 
 import { Argus } from "./argus.mjs";
+import { ArgusMemory, HierarchicalMemory } from "./memory.mjs";
+import { JsonlVectorDB, default_memory_path } from "./memory_store.mjs";
 import { ArgusReasoning, OfflineReasoning } from "./reasoning.mjs";
 import {
   AntigravityReasoning,
@@ -25,7 +27,12 @@ import {
   type AgyCallTrace,
   type AgyOptions,
 } from "./providers/antigravity.mjs";
-import { build_run_record, append_run_record, default_record_path } from "./run_record.mjs";
+import {
+  build_run_record,
+  append_run_record,
+  default_record_path,
+  resolve_commit,
+} from "./run_record.mjs";
 
 const PROVIDERS = ["antigravity", "antigravity-shim", "anthropic", "offline"] as const;
 
@@ -82,6 +89,13 @@ const INPUT = {
     .boolean()
     .default(true)
     .describe("Append a durable run record to <repo_root>/.argus/runs.jsonl."),
+  memory: z
+    .boolean()
+    .default(true)
+    .describe(
+      "Recall lessons from past reviews of this repo, and retain new ones, in " +
+        "<repo_root>/.argus/memory.jsonl. Disable for a review uninfluenced by prior runs.",
+    ),
 };
 
 const OUTPUT = {
@@ -100,6 +114,8 @@ const OUTPUT = {
   files_discovered: z.number(),
   files_selected: z.number(),
   selectivity: z.number(),
+  memory_recalled: z.number(),
+  memory_stored: z.number(),
   reflection_iterations: z.number().optional(),
   reflection_converged: z.boolean().optional(),
   audit_entries: z.number(),
@@ -169,7 +185,16 @@ server.registerTool(
             ? new ArgusReasoning()
             : new OfflineReasoning();
 
-    const argus = new Argus({ reasoning });
+    // Persistent by default — ArgusMemory's built-in store is process-local,
+    // and an MCP server that reviews the same repo all day would otherwise
+    // relearn the same lessons on every call.
+    const store = args.memory ? new JsonlVectorDB(default_memory_path(repo_root)) : null;
+    const memory = store ? new ArgusMemory(new HierarchicalMemory(store)) : new ArgusMemory();
+    if (store?.last_error) {
+      console.error(`argus: memory degraded (${store.last_error})`);
+    }
+
+    const argus = new Argus({ reasoning, memory });
     let outcome;
     try {
       outcome = await argus.review({
@@ -213,6 +238,7 @@ server.registerTool(
         build_run_record(outcome, {
           project,
           repo_root,
+          commit: resolve_commit(repo_root),
           provider: args.provider,
           invoked_via: "mcp",
           calls: agy_calls,
@@ -241,6 +267,8 @@ server.registerTool(
       files_discovered: p.files_discovered,
       files_selected: p.files_selected,
       selectivity: p.selectivity,
+      memory_recalled: argus.memory.trace.recalled.length,
+      memory_stored: argus.memory.trace.stored.length,
       reflection_iterations: r.iterations as number | undefined,
       reflection_converged: r.converged as boolean | undefined,
       audit_entries: (g.audit_entries as number) ?? 0,
@@ -261,6 +289,7 @@ server.registerTool(
       "",
       "---",
       `perception: ${p.files_selected}/${p.files_discovered} files selected (${(p.selectivity * 100).toFixed(1)}%)`,
+      `memory: ${JSON.stringify(outcome.memory_meta)}`,
       `reflection: ${JSON.stringify(outcome.reflection_meta)}`,
       `governance: audit_entries=${structured.audit_entries}, chain_ok=${structured.audit_chain_ok}`,
     ];

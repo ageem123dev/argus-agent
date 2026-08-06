@@ -11,6 +11,7 @@
  * are otherwise unrecoverable — agy's own cli.log is overwritten on every
  * invocation, so by the second review the first one's log is gone.
  */
+import { execFileSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
 
@@ -22,6 +23,13 @@ export interface RunRecord {
   timestamp: string;
   project: string;
   repo_root: string;
+  /**
+   * HEAD at review time. The join key for anything that scores Argus after the
+   * fact — a second reviewer's findings can only be matched to the run that
+   * should have caught them if both name the same commit. Absent when the repo
+   * has no commits or git is unavailable.
+   */
+  commit?: string;
   provider: string;
   /** Entry point that ran the review: "cli" or "mcp". */
   invoked_via: string;
@@ -37,6 +45,8 @@ export interface RunRecord {
   verdict: string;
   blocked_reason?: string;
   perception: { discovered: number; selected: number; selectivity: number };
+  /** Which store was in use, and how many lessons moved in each direction. */
+  memory: Record<string, unknown>;
   reflection: Record<string, unknown>;
   collaboration: Record<string, unknown>;
   governance: Record<string, unknown>;
@@ -57,6 +67,8 @@ export interface RunRecord {
 export interface RunRecordContext {
   project: string;
   repo_root: string;
+  /** Usually from resolve_commit(); injectable so build_run_record stays pure. */
+  commit?: string;
   provider: string;
   invoked_via: string;
   calls: AgyCallTrace[];
@@ -75,6 +87,7 @@ export function build_run_record(outcome: ReviewOutcome, ctx: RunRecordContext):
     timestamp: (ctx.now?.() ?? new Date()).toISOString(),
     project: ctx.project,
     repo_root: path.resolve(ctx.repo_root),
+    commit: ctx.commit,
     provider: ctx.provider,
     invoked_via: ctx.invoked_via,
     models: [...new Set(ctx.calls.map((t) => t.model))],
@@ -89,6 +102,7 @@ export function build_run_record(outcome: ReviewOutcome, ctx: RunRecordContext):
       selected: p?.files_selected ?? 0,
       selectivity: p?.selectivity ?? 0,
     },
+    memory: outcome.memory_meta,
     reflection: outcome.reflection_meta,
     collaboration: outcome.collaboration_meta,
     governance: outcome.governance_meta,
@@ -106,6 +120,28 @@ export function build_run_record(outcome: ReviewOutcome, ctx: RunRecordContext):
     },
     audit: (ctx.audit_entries ?? []) as RunRecord["audit"],
   };
+}
+
+/**
+ * HEAD of the repo under review, or undefined if there isn't one.
+ *
+ * Not called from build_run_record, which stays pure: callers resolve this and
+ * pass it in, so a record can be rebuilt from a trace without shelling out.
+ */
+export function resolve_commit(repo_root: string): string | undefined {
+  try {
+    const out = execFileSync("git", ["rev-parse", "HEAD"], {
+      cwd: repo_root,
+      encoding: "utf-8",
+      timeout: 10_000,
+      // A repo with no commits writes to stderr and exits non-zero; both are
+      // expected here, and neither should reach the caller's console.
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+    return out.trim() || undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 /** Default sink: `<repo_root>/.argus/runs.jsonl`. */

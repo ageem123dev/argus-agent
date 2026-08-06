@@ -15,6 +15,7 @@
   "scripts": {
     "build": "tsc && node -e \"require('fs').cpSync('src/examples','dist/examples',{recursive:true})\"",
     "prepare": "tsc && node -e \"require('fs').cpSync('src/examples','dist/examples',{recursive:true})\"",
+    "test": "tsx --test test/*.test.mts",
     "review": "node dist/cli.mjs",
     "mcp": "node dist/mcp.mjs",
     "demo": "node dist/cli.mjs dist/examples/sample.diff --project argus-self-review --offline"
