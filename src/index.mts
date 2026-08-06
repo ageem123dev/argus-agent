@@ -18,6 +18,8 @@ export type { InitResult } from "./init.mjs";
 export {
   build_run_record,
   append_run_record,
+  read_run_records,
+  find_run_for_commit,
   default_record_path,
   resolve_commit,
 } from "./run_record.mjs";
@@ -33,11 +35,46 @@ export {
   MemoryEntry,
   MemoryTier,
   distill_lessons,
+  lesson_from_finding,
+  lessons_from_findings,
   rank_by_overlap,
   score_overlap,
   tokenize,
 } from "./memory.mjs";
-export type { DistilledLesson, MemorySearchFilter, MemoryTrace, VectorDB } from "./memory.mjs";
+export type {
+  DistilledLesson,
+  LessonOptions,
+  MemorySearchFilter,
+  MemoryTrace,
+  VectorDB,
+} from "./memory.mjs";
+export {
+  classify_topic,
+  locus_from_path,
+  make_finding,
+  normalize_path,
+  normalize_severity,
+  parse_findings,
+  severity_weight,
+  strip_markdown,
+  SEVERITY_WEIGHT,
+  TOPICS,
+} from "./findings.mjs";
+export type { Finding } from "./findings.mjs";
+export {
+  ingest_findings,
+  partition_findings,
+  score_partition,
+} from "./ingest.mjs";
+export type {
+  FindingsAdapter,
+  IngestOptions,
+  IngestResult,
+  IngestScore,
+  MatchedPair,
+  Partition,
+  PartitionOptions,
+} from "./ingest.mjs";
 export { JsonlVectorDB, default_memory_path } from "./memory_store.mjs";
 export type { MemoryRecord, JsonlVectorDBOptions } from "./memory_store.mjs";
 export {

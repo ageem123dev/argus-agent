@@ -150,6 +150,60 @@ export function default_record_path(repo_root: string): string {
 }
 
 /**
+ * Read the log back. Tolerant of a half-written trailing line, for the same
+ * reason the memory store is: a killed process must cost one record, not all
+ * of them. A missing file reads as no history.
+ */
+export function read_run_records(file: string): RunRecord[] {
+  let raw: string;
+  try {
+    raw = fs.readFileSync(file, "utf-8");
+  } catch {
+    return [];
+  }
+  const records: RunRecord[] = [];
+  for (const line of raw.split("\n")) {
+    if (!line.trim()) {
+      continue;
+    }
+    try {
+      records.push(JSON.parse(line) as RunRecord);
+    } catch {
+      continue;
+    }
+  }
+  return records;
+}
+
+/**
+ * The review that should have caught a finding on `commit` — the most recent
+ * one over that commit, since a repeat review supersedes its predecessor.
+ *
+ * Matching is by prefix so a short SHA from a CI log or an MR page joins
+ * against the full one recorded here.
+ */
+export function find_run_for_commit(
+  records: RunRecord[],
+  commit: string,
+  project?: string,
+): RunRecord | undefined {
+  const wanted = commit.trim().toLowerCase();
+  if (!wanted) {
+    return undefined;
+  }
+  return records
+    .filter((r) => {
+      const sha = r.commit?.toLowerCase();
+      if (!sha) {
+        return false;
+      }
+      const joins = sha.startsWith(wanted) || wanted.startsWith(sha);
+      return joins && (!project || r.project === project);
+    })
+    .at(-1);
+}
+
+/**
  * Append one record. Never throws: a review that succeeded must not be reported
  * as failed because its log could not be written. Returns the failure instead.
  */

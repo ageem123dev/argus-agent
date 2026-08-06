@@ -5,9 +5,11 @@
  * store ships as the default so the agent works with zero setup).
  *
  * This module decides *what* is worth remembering; memory_store.mts decides
- * where it is kept. The two are separable on purpose: `distill_lessons` is
- * pure text-in/lessons-out and testable without touching a disk.
+ * where it is kept, and findings.mts normalizes what a finding is. The three
+ * are separable on purpose: `distill_lessons` is pure text-in/lessons-out and
+ * testable without touching a disk.
  */
+import { parse_findings, severity_weight, type Finding } from "./findings.mjs";
 
 export enum MemoryTier {
   WORKING = 1, // Context window
@@ -242,78 +244,39 @@ export interface DistilledLesson {
   topic?: string;
 }
 
-const SEVERITY_WEIGHT: Record<string, number> = {
-  critical: 0.95,
-  high: 0.9,
-  medium: 0.7,
-  moderate: 0.7,
-  low: 0.55,
-  minor: 0.5,
-  info: 0.4,
-  nit: 0.35,
-};
-
-const SEVERITY_RE = /\b(critical|high|medium|moderate|low|minor|info|nit)\b/i;
-
 /**
- * Issue classes worth generalizing over. Deliberately coarse: the point is to
- * remember which *kind* of bug this codebase has had, not to re-litigate one.
+ * Turn one finding into a lesson.
+ *
+ * The phrasing is deliberately *where to look harder*, never what to report. A
+ * lesson that says "this file has an unverified-JWT bug" is an instruction to
+ * find one again; a lesson that says "token verification in src/auth/** has
+ * been wrong before" is a reason to read carefully. The first manufactures
+ * false positives on the next run, the second does not — which matters most
+ * for lessons sourced from *another* reviewer's findings, where the temptation
+ * to encode the answer is strongest.
+ *
+ * `attribution` names who raised it, so a lesson learned from a missed finding
+ * reads as such rather than as Argus's own past work.
  */
-const TOPICS: Array<[string, RegExp]> = [
-  ["authentication and token handling", /\b(auth\w*|jwt|tokens?|oauth|sessions?|credentials?|passwords?|login)\b/i],
-  ["injection and untrusted input", /\b(sql|injections?|sanitiz\w+|escap\w+|xss|eval)\b/i],
-  ["secrets exposure", /\b(secrets?|hardcoded|api[_\s-]?keys?|dotenv)\b/i],
-  ["null and undefined safety", /\b(null|undefined|nullable|nullish|npe)\b/i],
-  ["error handling", /\b(unhandled|swallow\w*|rethrow|uncaught|silently)\b/i],
-  ["concurrency", /\b(races?|concurren\w+|deadlocks?|locks?|atomic|await)\b/i],
-  ["resource leaks", /\b(leaks?|leaking|unclosed|dispose|descriptors?)\b/i],
-  ["input validation", /\b(validat\w+|bounds|overflows?|untrusted|unchecked)\b/i],
-  ["type safety", /\b(casts?|coercion|assertions?|unsound)\b/i],
-  ["performance", /\b(quadratic|slowdowns?|bottlenecks?|perf)\b/i],
-];
-
-const PATH_RE =
-  /\b((?:[\w.-]+[/\\])+[\w.-]+\.(?:m?[jt]sx?|py|go|rs|rb|java|cs|php|sql|ya?ml|json|sh|c|h|cpp|hpp))\b/;
-
-/** Strip markdown ornamentation so the heuristics see prose. */
-function strip_markdown(line: string): string {
-  return line
-    .replace(/^\s*(?:[-*+]|\d+[.)])\s+/, "")
-    .replace(/[*_`#]+/g, "")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-/** Generalize a concrete path to the directory that keeps having the problem. */
-function locus_of(line: string): string | undefined {
-  const m = PATH_RE.exec(line);
-  if (!m) {
-    return undefined;
-  }
-  const file = m[1].replaceAll("\\", "/");
-  // Drop a leading a/ or b/ contributed by diff headers.
-  const cleaned = file.replace(/^[ab]\//, "");
-  const dir = cleaned.slice(0, cleaned.lastIndexOf("/"));
-  return dir ? `${dir}/**` : cleaned;
-}
-
-function topic_of(line: string): string | undefined {
-  for (const [name, re] of TOPICS) {
-    if (re.test(line)) {
-      return name;
-    }
-  }
-  return undefined;
+export function lesson_from_finding(
+  finding: Finding,
+  project: string,
+  attribution = "a past review",
+): DistilledLesson {
+  const where = finding.locus ? `in ${finding.locus}` : "in this project";
+  const what = finding.topic ?? "this class of defect";
+  return {
+    text:
+      `[${project}] Look harder ${where} for ${what}; ` +
+      `${attribution} raised a ${finding.severity}-severity finding there.`,
+    importance: severity_weight(finding.severity),
+    locus: finding.locus,
+    topic: finding.topic,
+  };
 }
 
 /**
  * Reduce a verdict to lessons worth keeping.
- *
- * The output is deliberately phrased as *where to look harder*, never as what
- * to report. A lesson that says "this file has an unverified-JWT bug" is an
- * instruction to find one again; a lesson that says "token verification in
- * src/auth/** has been wrong before" is a reason to read carefully. The first
- * manufactures false positives on the next run, the second does not.
  *
  * Findings that generalize to neither a locus nor a topic are dropped rather
  * than stored verbatim — a truncated verdict is noise, and noise in memory is
@@ -324,34 +287,39 @@ export function distill_lessons(
   project: string,
   max_lessons = 5,
 ): DistilledLesson[] {
+  return lessons_from_findings(parse_findings(verdict, "argus"), project, {
+    max_lessons,
+  });
+}
+
+export interface LessonOptions {
+  max_lessons?: number;
+  /** Who raised these findings, for the lesson text. */
+  attribution?: string;
+}
+
+/** Shared by verdict distillation and by ingestion of another reviewer's misses. */
+export function lessons_from_findings(
+  findings: Finding[],
+  project: string,
+  opts: LessonOptions = {},
+): DistilledLesson[] {
+  const max_lessons = opts.max_lessons ?? 5;
   const lessons: DistilledLesson[] = [];
   const seen = new Set<string>();
 
-  for (const raw of String(verdict).split("\n")) {
-    const line = strip_markdown(raw);
-    if (!line || !/severity/i.test(line)) {
-      continue;
-    }
-    const locus = locus_of(line);
-    const topic = topic_of(line);
-    if (!locus && !topic) {
+  for (const finding of findings) {
+    if (!finding.locus && !finding.topic) {
       continue; // nothing generalizable — do not store the raw finding
     }
-    const key = `${locus ?? ""}|${topic ?? ""}`;
+    // One lesson per place-and-class: five findings about the same directory
+    // are one thing to remember, not five.
+    const key = `${finding.locus ?? ""}|${finding.topic ?? ""}`;
     if (seen.has(key)) {
       continue;
     }
     seen.add(key);
-
-    const severity = (SEVERITY_RE.exec(line)?.[1] ?? "medium").toLowerCase();
-    const where = locus ? `in ${locus}` : "in this project";
-    const what = topic ?? "this class of defect";
-    lessons.push({
-      text: `[${project}] Look harder ${where} for ${what}; a past review raised a ${severity}-severity finding there.`,
-      importance: SEVERITY_WEIGHT[severity] ?? 0.6,
-      locus,
-      topic,
-    });
+    lessons.push(lesson_from_finding(finding, project, opts.attribution));
     if (lessons.length >= max_lessons) {
       break;
     }
