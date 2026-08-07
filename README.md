@@ -220,12 +220,27 @@ schema and its documentation yields two lessons, not one:
 [app] Look harder in Markdown under db/migrations/**; past reviews have found defects there.
 ```
 
-Recall then narrows to the languages the change actually touches. This is an
-exclusion, not a ranking preference: a lesson about English prose in a Markdown
-file is not a weak match for a Python diff, it is a wrong one, and it occupies a
-slot a real lesson needs. Measured on a real store, a Python-only change recalled
-three *TypeScript* lessons before scoping — matched purely on shared directory
-names — and none after, which is correct when no Python lesson exists yet.
+A directory does not imply a language — `components/feature/` routinely holds
+`.tsx`, `.css` and `.md` side by side — so recall matches on the **(language,
+place) pairs the change actually contains**, never on the two independently.
+Filtering them separately would make the Markdown lesson about a folder eligible
+for a change that touched only that folder's TypeScript, as long as the diff
+edited some Markdown anywhere; in a mixed repo that is nearly every commit.
+
+Three tiers, in order:
+
+1. lessons filed against a (language, place) the change contains — ranked by
+   severity, since all of them are already known to apply;
+2. lessons in a language the change uses, about places it did not touch — general
+   priors, which still transfer;
+3. never: a lesson about a place the change *did* edit, in a language it did not
+   write there.
+
+Measured across 18 real reviews, the share of recalled lessons pointing at code
+the change actually touched went 39% → 76% (querying on paths instead of a
+character prefix) → **94%** (pairing language with place). A Python-only change
+recalled three *TypeScript* lessons before scoping, matched purely on shared
+directory names, and none after — correct, when no Python lesson exists yet.
 
 Records written before languages were tracked carry none and stay eligible for
 every language, so an existing store degrades gracefully rather than going

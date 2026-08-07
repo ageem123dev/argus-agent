@@ -39,6 +39,8 @@ export {
   lessons_from_findings,
   matches_filter,
   rank_by_overlap,
+  rank_scoped,
+  recall_filter,
   score_overlap,
   tokenize,
 } from "./memory.mjs";
@@ -54,6 +56,8 @@ export {
   language_of,
   language_name,
   languages_of,
+  recall_scopes,
+  scope_key,
   LANGUAGE_BY_EXTENSION,
   LANGUAGE_DISPLAY,
   locus_from_path,

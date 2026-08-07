@@ -215,6 +215,62 @@ export function languages_of(files: string[]): string[] {
   return seen;
 }
 
+/** The key a lesson is filed under: its language and the place it applies to. */
+export function scope_key(language: string | undefined, locus: string | undefined): string {
+  return `${language ?? ""}|${locus ?? ""}`;
+}
+
+/**
+ * The (language, place) pairs a change actually contains.
+ *
+ * A directory does not imply a language — `components/feature/` routinely holds
+ * .tsx, .css and .md together — so the two cannot be filtered independently.
+ * Taking the union of languages and the union of directories would make a
+ * Markdown lesson about `components/feature/**` eligible for a change that
+ * touched only the TypeScript there, as long as the diff edited some Markdown
+ * anywhere. Pairing them is what makes the distinction hold.
+ *
+ * Each file contributes its own directory and every ancestor, so a lesson filed
+ * against a coarser directory still matches a change deeper inside it.
+ */
+/**
+ * Every place a change touches, ignoring language.
+ *
+ * Paired with `recall_scopes` this separates two different silences: a place
+ * the change never went (a lesson there is simply unrelated, and may still be
+ * worth surfacing as a general prior) from a place it went in another language
+ * (a lesson there is actively wrong for this change, and must not backfill).
+ */
+export function recall_loci(files: string[]): string[] {
+  const loci = new Set<string>();
+  for (const file of files) {
+    const p = normalize_path(file);
+    loci.add(p);
+    const parts = p.split("/");
+    for (let i = parts.length - 1; i > 0; i--) {
+      loci.add(`${parts.slice(0, i).join("/")}/**`);
+    }
+  }
+  return [...loci];
+}
+
+export function recall_scopes(files: string[]): string[] {
+  const scopes = new Set<string>();
+  for (const file of files) {
+    const p = normalize_path(file);
+    const language = language_of(p);
+    if (!language) {
+      continue;
+    }
+    scopes.add(scope_key(language, p)); // a lesson filed against the file itself
+    const parts = p.split("/");
+    for (let i = parts.length - 1; i > 0; i--) {
+      scopes.add(scope_key(language, `${parts.slice(0, i).join("/")}/**`));
+    }
+  }
+  return [...scopes];
+}
+
 export function classify_topic(text: string): string | undefined {
   let best: string | undefined;
   let best_hits = 0;

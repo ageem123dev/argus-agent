@@ -9,7 +9,16 @@
  * are separable on purpose: `distill_lessons` is pure text-in/lessons-out and
  * testable without touching a disk.
  */
-import { language_name, parse_findings, severity_weight, type Finding } from "./findings.mjs";
+import {
+  language_name,
+  languages_of,
+  parse_findings,
+  recall_loci,
+  recall_scopes,
+  scope_key,
+  severity_weight,
+  type Finding,
+} from "./findings.mjs";
 
 export enum MemoryTier {
   WORKING = 1, // Context window
@@ -21,13 +30,39 @@ export enum MemoryTier {
 export interface MemorySearchFilter {
   project?: string;
   /**
-   * Languages the current change touches. Lessons in other languages are
-   * excluded outright rather than merely outranked: a Markdown lesson competing
-   * for a slot in a TypeScript review is not a weak match, it is a wrong one.
-   * Lessons stored before languages were recorded carry none, and stay eligible
-   * — an unknown language must not silently drop the existing corpus.
+   * Languages the change touches. A lesson in a language the change does not
+   * contain is excluded outright rather than outranked: a Markdown lesson
+   * competing for a slot in a Python review is not a weak match, it is a wrong
+   * one. Lessons stored before languages were recorded carry none and stay
+   * eligible — an unknown language must not silently drop the existing corpus.
    */
   languages?: string[];
+  /**
+   * The (language, place) pairs the change actually contains, from
+   * `recall_scopes`. Lessons matching one are ranked ahead of the rest, which
+   * is what keeps a Markdown lesson about a mixed folder from displacing the
+   * TypeScript lesson about that same folder. Remaining slots still fall back
+   * to same-language lessons elsewhere, so a general prior can still transfer.
+   */
+  scopes?: string[];
+  /**
+   * Every place the change touches, regardless of language. A lesson filed
+   * against one of these in a language the change did not touch there is
+   * excluded outright — the Markdown lesson about a folder is wrong for a
+   * change that edited only that folder's TypeScript, even when the diff
+   * happens to move Markdown elsewhere.
+   */
+  loci?: string[];
+}
+
+/** Build the filter for a change. One place so the two stores cannot diverge. */
+export function recall_filter(project: string, changed_files: string[]): MemorySearchFilter {
+  return {
+    project,
+    languages: languages_of(changed_files),
+    scopes: recall_scopes(changed_files),
+    loci: recall_loci(changed_files),
+  };
 }
 
 /** The interface the long-term store must satisfy. */
@@ -125,6 +160,15 @@ export function rank_by_overlap<T extends { text: string; score: number }>(
  * Nothing here survives the process. Use JsonlVectorDB from memory_store.mts
  * for memory that actually spans sessions.
  */
+/** A record as the filter and ranker need to see it. */
+export interface ScopedRecord {
+  text: string;
+  score: number;
+  project?: string;
+  language?: string;
+  locus?: string;
+}
+
 /** True when a record is eligible under a filter. Shared by both stores. */
 export function matches_filter(
   record: { project?: string; language?: string },
@@ -140,8 +184,55 @@ export function matches_filter(
   return true;
 }
 
+/**
+ * Rank eligible records, preferring those filed against a (language, place)
+ * the change actually contains.
+ *
+ * Two tiers rather than one filter: an exact scope match is the lesson written
+ * about this very code, and it should never lose a slot to a lesson that merely
+ * shares a language. But excluding everything else would strand general priors
+ * — "TypeScript here keeps getting concurrency wrong" is worth surfacing on a
+ * TypeScript change in a directory that has no lessons of its own yet.
+ */
+export function rank_scoped<T extends ScopedRecord>(
+  items: T[],
+  query: string,
+  top_k: number,
+  filter?: MemorySearchFilter,
+): T[] {
+  const eligible = items.filter((r) => matches_filter(r, filter));
+  const scopes = filter?.scopes;
+  if (!scopes?.length) {
+    return rank_by_overlap(eligible, query, top_k);
+  }
+  const scoped = (r: T) => r.language && r.locus && scopes.includes(scope_key(r.language, r.locus));
+  // Wrong language for a place this change edits. Not merely unrelated — the
+  // change went here and this is not what it wrote — so it is dropped rather
+  // than left to backfill a spare slot.
+  const wrong_language_here = (r: T) =>
+    !scoped(r) && r.locus && filter?.loci?.includes(r.locus) === true;
+
+  const in_scope = new Set(eligible.filter(scoped));
+  // Inside the scope, keyword overlap is the wrong ranker: every one of these
+  // is confirmed to be about code this change edits, so overlap only measures
+  // how many path segments the lesson's directory happens to have. A lesson
+  // about `.claude/skills/bmad-ship-story/**` outscored one about
+  // `app/quarantine/**` five tokens to two and took every slot. Severity is
+  // what should order lessons already known to apply.
+  const ranked = [...in_scope]
+    .sort((a, b) => b.score - a.score || score_overlap(query, b.text) - score_overlap(query, a.text))
+    .slice(0, top_k);
+  if (ranked.length >= top_k) {
+    return ranked;
+  }
+  // Remaining slots go to lessons about places this change did not touch —
+  // general priors in a language it does use.
+  const rest = eligible.filter((r) => !in_scope.has(r) && !wrong_language_here(r));
+  return [...ranked, ...rank_by_overlap(rest, query, top_k - ranked.length)];
+}
+
 export class InMemoryVectorDB implements VectorDB {
-  private _items: Array<{ text: string; score: number; project?: string; language?: string }> = [];
+  private _items: ScopedRecord[] = [];
 
   upsert({ text, metadata }: { text: string; metadata?: Record<string, unknown> }): void {
     this._items.push({
@@ -149,12 +240,15 @@ export class InMemoryVectorDB implements VectorDB {
       score: (metadata?.importance as number) ?? 0.5,
       project: metadata?.project as string | undefined,
       language: metadata?.language as string | undefined,
+      locus: metadata?.locus as string | undefined,
     });
   }
 
   search(query: string, top_k = 5, filter?: MemorySearchFilter): Array<{ text: string; score: number }> {
-    const pool = this._items.filter((r) => matches_filter(r, filter));
-    return rank_by_overlap(pool, query, top_k).map((r) => ({ text: r.text, score: r.score }));
+    return rank_scoped(this._items, query, top_k, filter).map((r) => ({
+      text: r.text,
+      score: r.score,
+    }));
   }
 
   describe(): Record<string, unknown> {
@@ -172,6 +266,8 @@ export class MemoryEntry {
   project?: string;
   /** Scopes the entry so a Markdown lesson does not surface in a Python review. */
   language?: string;
+  /** The place the lesson applies to. Paired with `language`, never alone. */
+  locus?: string;
   _score?: number;
 
   constructor(
@@ -199,12 +295,13 @@ export class HierarchicalMemory {
     content: string,
     source: string,
     importance = 0.5,
-    scope: { project?: string; language?: string } = {},
+    scope: { project?: string; language?: string; locus?: string } = {},
   ): void {
     const entry = new MemoryEntry(content, MemoryTier.WORKING, source, {
       importance,
       project: scope.project,
       language: scope.language,
+      locus: scope.locus,
       token_count: Math.floor(content.length / 4),
     });
     this.working.push(entry);
@@ -264,6 +361,7 @@ export class HierarchicalMemory {
           importance: entry.importance,
           project: entry.project,
           language: entry.language,
+          locus: entry.locus,
         },
       });
     }
@@ -413,6 +511,7 @@ export class ArgusMemory {
       this.memory.add(lesson.text, "reflection", lesson.importance, {
         project,
         language: lesson.language,
+        locus: lesson.locus,
       });
     }
     this.memory.consolidate();
@@ -423,15 +522,19 @@ export class ArgusMemory {
   /**
    * Retrieve relevant past findings before starting.
    *
-   * `languages` narrows recall to the languages the change actually touches.
-   * Omitting it recalls across all of them, which is the old behaviour and
-   * still right for a caller that cannot tell.
+   * `changed_files` is both the query and the scope: lessons are filed against
+   * a language and a place, so the paths a change touches are what selects
+   * them. Pass `summary` only when the changed paths are unknown — recall then
+   * falls back to text overlap with no scoping, which is the older, blunter
+   * behaviour.
    */
-  before_review(project: string, diff_summary: string, languages?: string[]): string[] {
-    const recalled = this.memory.retrieve(`Past reviews for ${project}: ${diff_summary}`, 3, {
-      project,
-      languages,
-    });
+  before_review(project: string, changed_files: string[], summary?: string): string[] {
+    const query = summary ?? changed_files.join(" ");
+    const recalled = this.memory.retrieve(
+      `Past reviews for ${project}: ${query}`,
+      3,
+      recall_filter(project, changed_files),
+    );
     this.trace.recalled = recalled;
     return recalled;
   }

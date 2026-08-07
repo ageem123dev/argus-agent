@@ -16,7 +16,6 @@
  * them all.
  */
 import { extract_modified_files, gather_review_context, PerceptionTrace } from "./perception.mjs";
-import { languages_of } from "./findings.mjs";
 import { ArgusMemory, HierarchicalMemory } from "./memory.mjs";
 import { JsonlVectorDB, default_memory_path } from "./memory_store.mjs";
 import { ArgusReasoning, ReviewResult } from "./reasoning.mjs";
@@ -157,15 +156,17 @@ export class Argus {
     // recalled lessons pointed at directories the diff never touched. Lessons
     // are keyed by locus, so the set of changed paths is the natural query.
     //
-    // Recall is also narrowed to the languages the change touches: a lesson
-    // about English prose in a Markdown file is not a weak match for a Python
-    // diff, it is a wrong one, and it occupies a slot a real lesson needs.
+    // The paths also scope recall by language and place together. A directory
+    // does not imply a language — .tsx, .css and .md sit side by side — so a
+    // lesson about the Markdown in a folder must not surface for a change that
+    // touched only the TypeScript there.
     const changed = extract_modified_files(diff);
     const past_lessons = remember
       ? this.memory.before_review(
           project,
-          changed.join(" ") || diff.slice(0, 300),
-          languages_of(changed),
+          changed,
+          // Only when the diff named no files at all.
+          changed.length ? undefined : diff.slice(0, 300),
         )
       : [];
 

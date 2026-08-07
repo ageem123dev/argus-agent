@@ -203,6 +203,7 @@ export function run_ingest(opts: IngestRunOptions): IngestRunResult {
           m.memory.add(lesson.text, "reflection", lesson.importance, {
             project: opts.project,
             language: lesson.language,
+            locus: lesson.locus,
           });
         }
         m.memory.consolidate();

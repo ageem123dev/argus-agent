@@ -210,7 +210,7 @@ describe("ArgusMemory", () => {
     assert.equal(stored.length, 1);
 
     const next = new ArgusMemory(new HierarchicalMemory(new JsonlVectorDB(file)));
-    const recalled = next.before_review("app", "src/auth/token.mts", ["typescript"]);
+    const recalled = next.before_review("app", ["src/auth/token.mts"]);
     assert.equal(recalled.length, 1);
     assert.match(recalled[0], /Look harder in TypeScript under src\/auth\/\*\*/);
   });
@@ -222,27 +222,55 @@ describe("ArgusMemory", () => {
     first.after_review("- **severity: high** `src/auth/token.mts:42` the token is never verified.", "app");
 
     const next = new ArgusMemory(new HierarchicalMemory(new JsonlVectorDB(file)));
-    // A TypeScript change must not be primed with lessons about English prose.
-    const ts = next.before_review("app", "src/auth/token.mts", ["typescript"]);
-    assert.deepEqual(ts.map((l) => /under (.+?) for/.exec(l)?.[1]), ["src/auth/**"]);
-    assert.ok(ts.every((l) => l.includes("TypeScript")));
-
-    const md = next.before_review("app", "docs/auth/setup.md", ["markdown"]);
-    assert.ok(md.every((l) => l.includes("Markdown")));
+    assert.ok(next.before_review("app", ["src/auth/token.mts"]).every((l) => l.includes("TypeScript")));
+    assert.ok(next.before_review("app", ["docs/auth/setup.md"]).every((l) => l.includes("Markdown")));
   });
 
-  it("recalls across languages when the caller cannot tell", () => {
+  it("keeps a mixed folder's languages apart", () => {
+    // A directory does not imply a language: components/feature/ holds .tsx,
+    // .css and .md together. Filtering language and place independently would
+    // let the Markdown lesson about this folder surface for a change that
+    // touched only its TypeScript, as long as some Markdown moved anywhere.
+    const file = tmp_file();
+    const seed = new ArgusMemory(new HierarchicalMemory(new JsonlVectorDB(file)));
+    for (const v of [
+      "- **severity: high** `components/feature/Card.tsx:9` unchecked cast.",
+      "- **severity: high** `components/feature/Card.css:4` unchecked cast.",
+      "- **severity: high** `components/feature/README.md:2` unchecked cast.",
+    ]) {
+      seed.after_review(v, "app");
+    }
+
+    const mem = new ArgusMemory(new HierarchicalMemory(new JsonlVectorDB(file)));
+    // Editing the TypeScript in that folder, plus Markdown somewhere else.
+    const got = mem.before_review("app", ["components/feature/Button.tsx", "docs/intro.md"]);
+    assert.ok(
+      got.some((l) => l.includes("TypeScript under components/feature/**")),
+      "the lesson about this folder's TypeScript must come first",
+    );
+    assert.ok(
+      !got.some((l) => l.includes("Markdown under components/feature/**")),
+      "the folder's Markdown lesson is not what this change touched",
+    );
+    assert.ok(!got.some((l) => l.includes("CSS")), "no CSS changed");
+  });
+
+  it("falls back to same-language lessons when the place has none of its own", () => {
+    const file = tmp_file();
+    const seed = new ArgusMemory(new HierarchicalMemory(new JsonlVectorDB(file)));
+    seed.after_review("- **severity: high** `src/auth/token.mts:42` a race on refresh.", "app");
+
+    // A different TypeScript directory: the general prior should still transfer.
+    const mem = new ArgusMemory(new HierarchicalMemory(new JsonlVectorDB(file)));
+    assert.equal(mem.before_review("app", ["src/billing/invoice.mts"]).length, 1);
+  });
+
+  it("recalls unscoped when the changed paths are unknown", () => {
     const file = tmp_file();
     const mem = new ArgusMemory(new HierarchicalMemory(new JsonlVectorDB(file)));
     mem.after_review("- **severity: high** `src/auth/token.mts:42` unverified token.", "app");
-    // No languages passed: the old behaviour, and still right when unknown.
-    assert.equal(
-      new ArgusMemory(new HierarchicalMemory(new JsonlVectorDB(file))).before_review(
-        "app",
-        "src/auth/token.mts",
-      ).length,
-      1,
-    );
+    const next = new ArgusMemory(new HierarchicalMemory(new JsonlVectorDB(file)));
+    assert.equal(next.before_review("app", [], "src/auth/token.mts").length, 1);
   });
 
   it("reports which store is in use, so amnesia is visible", () => {
@@ -254,7 +282,7 @@ describe("ArgusMemory", () => {
   });
 
   it("recalls nothing on a fresh in-memory store — the pre-existing behaviour", () => {
-    assert.deepEqual(new ArgusMemory().before_review("app", "diff --git a/src/auth/x.mts"), []);
+    assert.deepEqual(new ArgusMemory().before_review("app", ["src/auth/x.mts"]), []);
   });
 });
 
