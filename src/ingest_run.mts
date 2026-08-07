@@ -200,7 +200,10 @@ export function run_ingest(opts: IngestRunOptions): IngestRunResult {
       if (outcome.lessons.length) {
         const m = store();
         for (const lesson of outcome.lessons) {
-          m.memory.add(lesson.text, "reflection", lesson.importance, opts.project);
+          m.memory.add(lesson.text, "reflection", lesson.importance, {
+            project: opts.project,
+            language: lesson.language,
+          });
         }
         m.memory.consolidate();
         result.written += outcome.lessons.length;

@@ -37,6 +37,7 @@ export {
   distill_lessons,
   lesson_from_finding,
   lessons_from_findings,
+  matches_filter,
   rank_by_overlap,
   score_overlap,
   tokenize,
@@ -50,6 +51,11 @@ export type {
 } from "./memory.mjs";
 export {
   classify_topic,
+  language_of,
+  language_name,
+  languages_of,
+  LANGUAGE_BY_EXTENSION,
+  LANGUAGE_DISPLAY,
   locus_from_path,
   make_finding,
   normalize_path,

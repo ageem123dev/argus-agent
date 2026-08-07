@@ -71,7 +71,8 @@ describe("distill_lessons", () => {
 
   it("phrases lessons as where to look, not what to report", () => {
     const [first] = distill_lessons(verdict, "app");
-    assert.match(first.text, /^\[app\] Look harder in src\/auth\/\*\*/);
+    assert.match(first.text, /^\[app\] Look harder in TypeScript under src\/auth\/\*\*/);
+    assert.equal(first.language, "typescript");
     // The specific defect must not survive into the next review's prompt.
     assert.doesNotMatch(first.text, /jwt\.decode/);
   });
@@ -209,9 +210,39 @@ describe("ArgusMemory", () => {
     assert.equal(stored.length, 1);
 
     const next = new ArgusMemory(new HierarchicalMemory(new JsonlVectorDB(file)));
-    const recalled = next.before_review("app", "diff --git a/src/auth/token.mts b/src/auth/token.mts");
+    const recalled = next.before_review("app", "src/auth/token.mts", ["typescript"]);
     assert.equal(recalled.length, 1);
-    assert.match(recalled[0], /Look harder in src\/auth\/\*\*/);
+    assert.match(recalled[0], /Look harder in TypeScript under src\/auth\/\*\*/);
+  });
+
+  it("does not recall another language's lessons", () => {
+    const file = tmp_file();
+    const first = new ArgusMemory(new HierarchicalMemory(new JsonlVectorDB(file)));
+    first.after_review("- **severity: high** `docs/auth/setup.md:4` the token steps are wrong.", "app");
+    first.after_review("- **severity: high** `src/auth/token.mts:42` the token is never verified.", "app");
+
+    const next = new ArgusMemory(new HierarchicalMemory(new JsonlVectorDB(file)));
+    // A TypeScript change must not be primed with lessons about English prose.
+    const ts = next.before_review("app", "src/auth/token.mts", ["typescript"]);
+    assert.deepEqual(ts.map((l) => /under (.+?) for/.exec(l)?.[1]), ["src/auth/**"]);
+    assert.ok(ts.every((l) => l.includes("TypeScript")));
+
+    const md = next.before_review("app", "docs/auth/setup.md", ["markdown"]);
+    assert.ok(md.every((l) => l.includes("Markdown")));
+  });
+
+  it("recalls across languages when the caller cannot tell", () => {
+    const file = tmp_file();
+    const mem = new ArgusMemory(new HierarchicalMemory(new JsonlVectorDB(file)));
+    mem.after_review("- **severity: high** `src/auth/token.mts:42` unverified token.", "app");
+    // No languages passed: the old behaviour, and still right when unknown.
+    assert.equal(
+      new ArgusMemory(new HierarchicalMemory(new JsonlVectorDB(file))).before_review(
+        "app",
+        "src/auth/token.mts",
+      ).length,
+      1,
+    );
   });
 
   it("reports which store is in use, so amnesia is visible", () => {

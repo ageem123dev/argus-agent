@@ -270,7 +270,10 @@ describe("ingest_findings", () => {
     assert.equal(lesson.raised_by, "coderabbit");
     // Attribution and severity stay out of the sentence: in the text they made
     // one lesson several records, which then competed for the same recall slots.
-    assert.equal(lesson.text, "[app] Look harder in src/auth/** for authentication and token handling.");
+    assert.equal(
+      lesson.text,
+      "[app] Look harder in TypeScript under src/auth/** for authentication and token handling.",
+    );
   });
 
   it("gives one locus and topic one text, whoever raised it and however grave", () => {
@@ -286,8 +289,20 @@ describe("ingest_findings", () => {
 
   it("still phrases a borrowed finding as where to look, not what to report", () => {
     const [lesson] = ingest_findings([], [external()], "app").lessons;
-    assert.match(lesson.text, /^\[app\] Look harder in src\/auth\/\*\*/);
+    assert.match(lesson.text, /^\[app\] Look harder in TypeScript under src\/auth\/\*\*/);
     assert.doesNotMatch(lesson.text, /jwt\.decode/);
+  });
+
+  it("keeps a lesson per language, not one per directory", () => {
+    // The same directory holding a schema and its documentation yields two
+    // lessons, not one: SQL injection says nothing about the Markdown beside it.
+    const misses = [
+      external({ path: "db/migrations/0002_add_users.sql", title: "unescaped identifier" }),
+      external({ path: "db/migrations/README.md", title: "unescaped identifier" }),
+    ];
+    const { lessons } = ingest_findings([], misses, "app");
+    assert.equal(lessons.length, 2);
+    assert.deepEqual(lessons.map((l) => l.language).sort(), ["markdown", "sql"]);
   });
 
   it("collapses many misses in one directory into one lesson", () => {

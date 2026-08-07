@@ -29,6 +29,16 @@ export interface Finding {
   id?: string;
   /** The reviewer's own severity word, before normalization. */
   raw_severity?: string;
+  /**
+   * The language the finding is in, from the file's extension.
+   *
+   * A defect class does not carry across languages: SQL injection in a
+   * migration says nothing about a Markdown file, and "null and undefined
+   * safety" means something different in Python than in TypeScript. Without
+   * this, one repo's prose, schema and application code all pooled into a
+   * single body of lessons that recall drew from indiscriminately.
+   */
+  language?: string;
   /** Directory glob the finding sits in: the unit lessons generalize over. */
   locus?: string;
   /** Issue class from TOPICS, when one is recognizable. */
@@ -140,6 +150,71 @@ export function locus_from_path(raw: string | undefined): string | undefined {
  * to table order, so a genuinely ambiguous finding is classified arbitrarily —
  * see the caveat on partition_findings about what that costs.
  */
+/**
+ * Language by file extension.
+ *
+ * Dialects that share a defect surface collapse to one entry — .ts/.mts/.tsx
+ * are all "typescript" — because a lesson about one is a lesson about the
+ * others. Prose and configuration are included deliberately: reviews do find
+ * real problems in Markdown and YAML, and those lessons are worth keeping,
+ * just not worth recalling when reviewing code.
+ */
+export const LANGUAGE_BY_EXTENSION: Record<string, string> = {
+  ts: "typescript", mts: "typescript", cts: "typescript", tsx: "typescript",
+  js: "javascript", mjs: "javascript", cjs: "javascript", jsx: "javascript",
+  py: "python", pyi: "python",
+  sql: "sql",
+  md: "markdown", mdx: "markdown", markdown: "markdown", txt: "markdown",
+  yml: "yaml", yaml: "yaml",
+  json: "json", jsonc: "json",
+  toml: "toml", ini: "toml", cfg: "toml",
+  sh: "shell", bash: "shell", zsh: "shell", ps1: "powershell",
+  go: "go", rs: "rust", rb: "ruby", java: "java", kt: "kotlin",
+  cs: "csharp", php: "php", swift: "swift", scala: "scala", dart: "dart",
+  lua: "lua", c: "c", h: "c", cpp: "cpp", hpp: "cpp",
+  css: "css", scss: "css", sass: "css",
+  html: "html", htm: "html", vue: "vue", svelte: "svelte", xml: "xml",
+};
+
+/** How a language is written in a lesson sentence. */
+export const LANGUAGE_DISPLAY: Record<string, string> = {
+  typescript: "TypeScript", javascript: "JavaScript", python: "Python",
+  sql: "SQL", markdown: "Markdown", yaml: "YAML", json: "JSON", toml: "TOML",
+  shell: "shell", powershell: "PowerShell", go: "Go", rust: "Rust",
+  ruby: "Ruby", java: "Java", kotlin: "Kotlin", csharp: "C#", php: "PHP",
+  swift: "Swift", scala: "Scala", dart: "Dart", lua: "Lua", c: "C",
+  cpp: "C++", css: "CSS", html: "HTML", vue: "Vue", svelte: "Svelte", xml: "XML",
+};
+
+/** The language a path is written in, or undefined if the extension is unknown. */
+export function language_of(file: string | undefined): string | undefined {
+  if (!file) {
+    return undefined;
+  }
+  const base = normalize_path(file).split("/").pop() ?? "";
+  const cut = base.lastIndexOf(".");
+  if (cut <= 0) {
+    return undefined; // no extension, or a dotfile with no suffix
+  }
+  return LANGUAGE_BY_EXTENSION[base.slice(cut + 1).toLowerCase()];
+}
+
+export function language_name(language: string | undefined): string | undefined {
+  return language ? (LANGUAGE_DISPLAY[language] ?? language) : undefined;
+}
+
+/** The distinct languages a set of paths covers, in first-seen order. */
+export function languages_of(files: string[]): string[] {
+  const seen: string[] = [];
+  for (const f of files) {
+    const lang = language_of(f);
+    if (lang && !seen.includes(lang)) {
+      seen.push(lang);
+    }
+  }
+  return seen;
+}
+
 export function classify_topic(text: string): string | undefined {
   let best: string | undefined;
   let best_hits = 0;
@@ -157,11 +232,14 @@ export function classify_topic(text: string): string | undefined {
 export function make_finding(
   partial: Omit<Finding, "severity" | "locus" | "topic"> & { severity?: string },
 ): Finding {
+  // `language` may be supplied by an adapter that knows better than the
+  // extension does; otherwise it is derived below.
   const path = partial.path ? normalize_path(partial.path) : undefined;
   return {
     ...partial,
     path,
     severity: normalize_severity(partial.severity),
+    language: partial.language ?? language_of(path),
     locus: locus_from_path(path),
     // Category first: a reviewer's own label is a better signal than our
     // keyword scan over its prose, when it bothered to provide one.

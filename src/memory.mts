@@ -9,7 +9,7 @@
  * are separable on purpose: `distill_lessons` is pure text-in/lessons-out and
  * testable without touching a disk.
  */
-import { parse_findings, severity_weight, type Finding } from "./findings.mjs";
+import { language_name, parse_findings, severity_weight, type Finding } from "./findings.mjs";
 
 export enum MemoryTier {
   WORKING = 1, // Context window
@@ -17,9 +17,17 @@ export enum MemoryTier {
   LONGTERM = 3, // Persistent storage
 }
 
-/** Narrows retrieval to one project's lessons. Stores may ignore it. */
+/** Narrows retrieval. Stores may ignore it. */
 export interface MemorySearchFilter {
   project?: string;
+  /**
+   * Languages the current change touches. Lessons in other languages are
+   * excluded outright rather than merely outranked: a Markdown lesson competing
+   * for a slot in a TypeScript review is not a weak match, it is a wrong one.
+   * Lessons stored before languages were recorded carry none, and stay eligible
+   * — an unknown language must not silently drop the existing corpus.
+   */
+  languages?: string[];
 }
 
 /** The interface the long-term store must satisfy. */
@@ -117,21 +125,35 @@ export function rank_by_overlap<T extends { text: string; score: number }>(
  * Nothing here survives the process. Use JsonlVectorDB from memory_store.mts
  * for memory that actually spans sessions.
  */
+/** True when a record is eligible under a filter. Shared by both stores. */
+export function matches_filter(
+  record: { project?: string; language?: string },
+  filter?: MemorySearchFilter,
+): boolean {
+  if (filter?.project && record.project && record.project !== filter.project) {
+    return false;
+  }
+  // A record with no language predates language tracking; keep it eligible.
+  if (filter?.languages?.length && record.language) {
+    return filter.languages.includes(record.language);
+  }
+  return true;
+}
+
 export class InMemoryVectorDB implements VectorDB {
-  private _items: Array<{ text: string; score: number; project?: string }> = [];
+  private _items: Array<{ text: string; score: number; project?: string; language?: string }> = [];
 
   upsert({ text, metadata }: { text: string; metadata?: Record<string, unknown> }): void {
     this._items.push({
       text,
       score: (metadata?.importance as number) ?? 0.5,
       project: metadata?.project as string | undefined,
+      language: metadata?.language as string | undefined,
     });
   }
 
   search(query: string, top_k = 5, filter?: MemorySearchFilter): Array<{ text: string; score: number }> {
-    const pool = filter?.project
-      ? this._items.filter((r) => !r.project || r.project === filter.project)
-      : this._items;
+    const pool = this._items.filter((r) => matches_filter(r, filter));
     return rank_by_overlap(pool, query, top_k).map((r) => ({ text: r.text, score: r.score }));
   }
 
@@ -148,6 +170,8 @@ export class MemoryEntry {
   token_count = 0;
   /** Scopes the entry so one repo's lessons do not leak into another's review. */
   project?: string;
+  /** Scopes the entry so a Markdown lesson does not surface in a Python review. */
+  language?: string;
   _score?: number;
 
   constructor(
@@ -171,10 +195,16 @@ export class HierarchicalMemory {
   ) {}
 
   /** Add new information to working memory. */
-  add(content: string, source: string, importance = 0.5, project?: string): void {
+  add(
+    content: string,
+    source: string,
+    importance = 0.5,
+    scope: { project?: string; language?: string } = {},
+  ): void {
     const entry = new MemoryEntry(content, MemoryTier.WORKING, source, {
       importance,
-      project,
+      project: scope.project,
+      language: scope.language,
       token_count: Math.floor(content.length / 4),
     });
     this.working.push(entry);
@@ -190,6 +220,8 @@ export class HierarchicalMemory {
         project: filter?.project,
         token_count: Math.floor(result.text.length / 4),
       });
+      // No language: a retrieved entry's own language is not known here, and
+      // guessing it from the query would relabel the record on re-consolidation.
       this.working.push(entry);
     }
     this._enforce_budget();
@@ -231,6 +263,7 @@ export class HierarchicalMemory {
           source: entry.source,
           importance: entry.importance,
           project: entry.project,
+          language: entry.language,
         },
       });
     }
@@ -254,6 +287,8 @@ export interface DistilledLesson {
   topic?: string;
   /** Who raised the underlying finding. Reported, not written into the text. */
   raised_by?: string;
+  /** The language the lesson is about. Scopes recall. */
+  language?: string;
 }
 
 /**
@@ -275,12 +310,17 @@ export function lesson_from_finding(
   project: string,
   attribution = "a past review",
 ): DistilledLesson {
-  const where = finding.locus ?? "this project";
-  // The text carries only what identifies the lesson: the place and the issue
-  // class. Severity and attribution used to be in the sentence, which made the
-  // *same* lesson a different record every time either changed — one directory
-  // accumulated three variants that then competed for the same three recall
-  // slots. Severity survives as `importance`, which is what ranking reads.
+  // The text carries only what identifies the lesson: the language, the place
+  // and the issue class. Severity and attribution used to be in the sentence,
+  // which made the *same* lesson a different record every time either changed —
+  // one directory accumulated three variants that then competed for the same
+  // three recall slots. Severity survives as `importance`, which ranking reads.
+  const language = language_name(finding.language);
+  const where = finding.locus
+    ? language
+      ? `${language} under ${finding.locus}`
+      : finding.locus
+    : (language ?? "this project");
   return {
     text: finding.topic
       ? `[${project}] Look harder in ${where} for ${finding.topic}.`
@@ -288,6 +328,7 @@ export function lesson_from_finding(
     importance: severity_weight(finding.severity),
     locus: finding.locus,
     topic: finding.topic,
+    language: finding.language,
     raised_by: attribution,
   };
 }
@@ -329,9 +370,10 @@ export function lessons_from_findings(
     if (!finding.locus && !finding.topic) {
       continue; // nothing generalizable — do not store the raw finding
     }
-    // One lesson per place-and-class: five findings about the same directory
-    // are one thing to remember, not five.
-    const key = `${finding.locus ?? ""}|${finding.topic ?? ""}`;
+    // One lesson per language, place and class: five findings about the same
+    // directory are one thing to remember, not five — but the Markdown and the
+    // TypeScript in that directory are two.
+    const key = `${finding.language ?? ""}|${finding.locus ?? ""}|${finding.topic ?? ""}`;
     if (seen.has(key)) {
       continue;
     }
@@ -368,20 +410,28 @@ export class ArgusMemory {
   after_review(verdict: string, project: string): string[] {
     const lessons = distill_lessons(verdict, project);
     for (const lesson of lessons) {
-      this.memory.add(lesson.text, "reflection", lesson.importance, project);
+      this.memory.add(lesson.text, "reflection", lesson.importance, {
+        project,
+        language: lesson.language,
+      });
     }
     this.memory.consolidate();
     this.trace.stored = lessons.map((l) => l.text);
     return this.trace.stored;
   }
 
-  /** Retrieve relevant past findings before starting. */
-  before_review(project: string, diff_summary: string): string[] {
-    const recalled = this.memory.retrieve(
-      `Past reviews for ${project}: ${diff_summary}`,
-      3,
-      { project },
-    );
+  /**
+   * Retrieve relevant past findings before starting.
+   *
+   * `languages` narrows recall to the languages the change actually touches.
+   * Omitting it recalls across all of them, which is the old behaviour and
+   * still right for a caller that cannot tell.
+   */
+  before_review(project: string, diff_summary: string, languages?: string[]): string[] {
+    const recalled = this.memory.retrieve(`Past reviews for ${project}: ${diff_summary}`, 3, {
+      project,
+      languages,
+    });
     this.trace.recalled = recalled;
     return recalled;
   }

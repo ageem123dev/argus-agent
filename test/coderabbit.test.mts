@@ -379,7 +379,7 @@ describe("run_ingest", () => {
     assert.equal(entry.matched_run?.commit, HEAD);
     assert.equal(entry.score?.missed, 1);
     assert.equal(entry.lessons.length, 1);
-    assert.match(entry.lessons[0].text, /Look harder in src\/auth\/\*\*/);
+    assert.match(entry.lessons[0].text, /Look harder in TypeScript under src\/auth\/\*\*/);
     assert.equal(entry.lessons[0].raised_by, "coderabbit");
 
     // And it reached the store the next review will read.

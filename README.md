@@ -211,6 +211,27 @@ that names the *locus* is a reason to read carefully. Watch `memory.recalled` an
 `memory.stored` in `.argus/runs.jsonl` alongside confidence over time — "it's learning"
 and "it's getting more credulous" look identical from a single run.
 
+**Lessons are scoped by language.** A finding's language comes from the file's
+extension, and it is part of what identifies a lesson — so a directory holding a
+schema and its documentation yields two lessons, not one:
+
+```
+[app] Look harder in SQL under db/migrations/** for injection and untrusted input.
+[app] Look harder in Markdown under db/migrations/**; past reviews have found defects there.
+```
+
+Recall then narrows to the languages the change actually touches. This is an
+exclusion, not a ranking preference: a lesson about English prose in a Markdown
+file is not a weak match for a Python diff, it is a wrong one, and it occupies a
+slot a real lesson needs. Measured on a real store, a Python-only change recalled
+three *TypeScript* lessons before scoping — matched purely on shared directory
+names — and none after, which is correct when no Python lesson exists yet.
+
+Records written before languages were tracked carry none and stay eligible for
+every language, so an existing store degrades gracefully rather than going
+silent. Because lessons are a pure function of the run records and the ingested
+reviews, a store can always be regenerated after the distillation changes.
+
 The file is an append-only log: each upsert appends a line, later lines win on load, and
 it compacts to one line per lesson once it grows past ~4x. That keeps two concurrent
 reviews of the same repo from clobbering each other. Re-learning a lesson bumps its

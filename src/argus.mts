@@ -16,6 +16,7 @@
  * them all.
  */
 import { extract_modified_files, gather_review_context, PerceptionTrace } from "./perception.mjs";
+import { languages_of } from "./findings.mjs";
 import { ArgusMemory, HierarchicalMemory } from "./memory.mjs";
 import { JsonlVectorDB, default_memory_path } from "./memory_store.mjs";
 import { ArgusReasoning, ReviewResult } from "./reasoning.mjs";
@@ -155,8 +156,17 @@ export class Argus {
     // alphabetically-first changed file: measured over 18 real reviews, 61% of
     // recalled lessons pointed at directories the diff never touched. Lessons
     // are keyed by locus, so the set of changed paths is the natural query.
+    //
+    // Recall is also narrowed to the languages the change touches: a lesson
+    // about English prose in a Markdown file is not a weak match for a Python
+    // diff, it is a wrong one, and it occupies a slot a real lesson needs.
+    const changed = extract_modified_files(diff);
     const past_lessons = remember
-      ? this.memory.before_review(project, extract_modified_files(diff).join(" ") || diff.slice(0, 300))
+      ? this.memory.before_review(
+          project,
+          changed.join(" ") || diff.slice(0, 300),
+          languages_of(changed),
+        )
       : [];
 
     // 4. collaboration — fan out to sub-agents on complex diffs
