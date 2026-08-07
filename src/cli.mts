@@ -61,6 +61,7 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
       severities: { type: "string" },
       commit: { type: "string" },
       "dry-run": { type: "boolean", default: false },
+      reingest: { type: "boolean", default: false },
       force: { type: "boolean", default: false },
     },
   });
@@ -92,6 +93,7 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
       severities: parse_severities(values.severities as string | undefined),
       commit: values.commit as string | undefined,
       dry_run: values["dry-run"] as boolean,
+      reingest: values.reingest as boolean,
       record_file: values.record as string | undefined,
       memory_file: values.memory as string | undefined,
     });

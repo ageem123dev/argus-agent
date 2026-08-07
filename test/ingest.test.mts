@@ -13,6 +13,7 @@ import { after, describe, it } from "node:test";
 
 import { make_finding, parse_findings } from "../src/findings.mjs";
 import { ingest_findings, partition_findings, score_partition } from "../src/ingest.mjs";
+import { lesson_from_finding } from "../src/memory.mjs";
 import { find_run_for_commit, read_run_records } from "../src/run_record.mjs";
 import type { RunRecord } from "../src/run_record.mjs";
 
@@ -264,9 +265,23 @@ describe("ingest_findings", () => {
     assert.deepEqual(ingest_findings([ours()], [external()], "app").lessons, []);
   });
 
-  it("attributes the lesson to the reviewer that raised it", () => {
+  it("attributes the lesson without letting attribution vary the text", () => {
     const [lesson] = ingest_findings([], [external()], "app").lessons;
-    assert.match(lesson.text, /coderabbit raised a high-severity finding/);
+    assert.equal(lesson.raised_by, "coderabbit");
+    // Attribution and severity stay out of the sentence: in the text they made
+    // one lesson several records, which then competed for the same recall slots.
+    assert.equal(lesson.text, "[app] Look harder in src/auth/** for authentication and token handling.");
+  });
+
+  it("gives one locus and topic one text, whoever raised it and however grave", () => {
+    const mine = lesson_from_finding(ours(), "app", "a past review");
+    const theirs = lesson_from_finding(
+      make_finding({ ...external(), severity: "critical" }),
+      "app",
+      "coderabbit",
+    );
+    assert.equal(mine.text, theirs.text);
+    assert.notEqual(mine.importance, theirs.importance);
   });
 
   it("still phrases a borrowed finding as where to look, not what to report", () => {

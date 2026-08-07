@@ -51,7 +51,12 @@ const STOP_TOKENS = new Set([
   "have", "been", "were", "which", "would", "should", "code", "file", "files",
   "line", "lines", "review", "reviews", "reviewed", "past", "change", "changes",
   "changed", "project", "lesson", "lessons", "harder", "flagged", "look", "issue",
-  "issues", "severity",
+  "issues", "severity", "defects", "found", "there",
+  // File extensions. Every path in a TypeScript repo ends in one, so they match
+  // everything and separate nothing — pure dilution once tokens this short are
+  // admitted at all.
+  "mts", "cts", "tsx", "jsx", "mjs", "cjs", "json", "yml", "yaml", "toml", "md",
+  "mdx", "css", "scss", "html", "htm", "sql", "sh", "py", "rb", "rs", "go",
 ]);
 
 /**
@@ -66,7 +71,12 @@ export function tokenize(text: string): string[] {
       String(text)
         .toLowerCase()
         .split(/[^a-z0-9]+/)
-        .filter((t) => t.length > 3 && !STOP_TOKENS.has(t)),
+        // Three characters, not four: path segments carry most of the signal
+        // here, and `app`, `api`, `db`, `src` and `lib` are exactly the ones a
+        // longer minimum discards. Dropping them let `core/quarantine/**` beat
+        // `app/quarantine/**` on every diff touching both, because only one of
+        // the two had a second scorable token.
+        .filter((t) => t.length > 2 && !STOP_TOKENS.has(t)),
     ),
   ];
 }
@@ -242,6 +252,8 @@ export interface DistilledLesson {
   locus?: string;
   /** Issue class the finding fell into, when one was recognizable. */
   topic?: string;
+  /** Who raised the underlying finding. Reported, not written into the text. */
+  raised_by?: string;
 }
 
 /**
@@ -263,15 +275,20 @@ export function lesson_from_finding(
   project: string,
   attribution = "a past review",
 ): DistilledLesson {
-  const where = finding.locus ? `in ${finding.locus}` : "in this project";
-  const what = finding.topic ?? "this class of defect";
+  const where = finding.locus ?? "this project";
+  // The text carries only what identifies the lesson: the place and the issue
+  // class. Severity and attribution used to be in the sentence, which made the
+  // *same* lesson a different record every time either changed — one directory
+  // accumulated three variants that then competed for the same three recall
+  // slots. Severity survives as `importance`, which is what ranking reads.
   return {
-    text:
-      `[${project}] Look harder ${where} for ${what}; ` +
-      `${attribution} raised a ${finding.severity}-severity finding there.`,
+    text: finding.topic
+      ? `[${project}] Look harder in ${where} for ${finding.topic}.`
+      : `[${project}] Look harder in ${where}; past reviews have found defects there.`,
     importance: severity_weight(finding.severity),
     locus: finding.locus,
     topic: finding.topic,
+    raised_by: attribution,
   };
 }
 

@@ -11,6 +11,7 @@
  * a chance to learn.
  */
 import * as fs from "node:fs";
+import * as path from "node:path";
 
 import { load_reviews, resolve_coderabbit_paths, type LoadedReview } from "./adapters/coderabbit.mjs";
 import { load_config, type ArgusConfig } from "./config.mjs";
@@ -31,6 +32,8 @@ export interface IngestRunOptions {
   commit?: string;
   /** Compare and report, write nothing. */
   dry_run?: boolean;
+  /** Re-learn from reviews already ingested. Off by default — see ingest_ledger. */
+  reingest?: boolean;
   record_file?: string;
   memory_file?: string;
   env?: NodeJS.ProcessEnv;
@@ -65,6 +68,38 @@ export interface IngestRunResult {
   filtered_out: number;
   written: number;
   memory_file?: string;
+}
+
+/**
+ * Reviews already learned from: `<repo>/.argus/ingested.json`.
+ *
+ * Without it, ingestion is not idempotent. Re-running it over an unchanged
+ * CodeRabbit review rewrites the same lessons and bumps each one's `seen`
+ * count again — so a store built from four reviews reported a lesson as
+ * confirmed sixteen times. `seen` is meant to say how many independent reviews
+ * reached the same conclusion; letting it count command invocations turns the
+ * one signal that distinguishes a recurring problem from a one-off into noise.
+ */
+export function ingest_ledger_path(repo_root: string): string {
+  return path.join(path.resolve(repo_root), ".argus", "ingested.json");
+}
+
+function read_ledger(file: string): Record<string, string> {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(file, "utf-8"));
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function write_ledger(file: string, ledger: Record<string, string>): void {
+  try {
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, JSON.stringify(ledger, null, 2) + "\n", "utf-8");
+  } catch {
+    // A ledger that cannot be written costs idempotence, not correctness.
+  }
 }
 
 export function run_ingest(opts: IngestRunOptions): IngestRunResult {
@@ -102,6 +137,9 @@ export function run_ingest(opts: IngestRunOptions): IngestRunResult {
   }
 
   const runs = read_run_records(opts.record_file ?? default_record_path(opts.repo_root));
+  const ledger_file = ingest_ledger_path(opts.repo_root);
+  const ledger = read_ledger(ledger_file);
+  let ledger_changed = false;
 
   // Opened once and only if something is actually written: ingestion should
   // not create an empty memory store just by being run.
@@ -120,6 +158,10 @@ export function run_ingest(opts: IngestRunOptions): IngestRunResult {
     const entry: ReviewIngestResult = { review, lessons: [] };
     result.reviews.push(entry);
 
+    if (review.id && ledger[review.id] && !opts.reingest) {
+      entry.skipped_reason = `already ingested on ${ledger[review.id]} (--reingest to repeat)`;
+      continue;
+    }
     const commit = opts.commit ?? review.head_commit;
     if (!commit) {
       entry.skipped_reason = "the review names no commit";
@@ -154,14 +196,26 @@ export function run_ingest(opts: IngestRunOptions): IngestRunResult {
     entry.score = outcome.score;
     entry.lessons = outcome.lessons;
 
-    if (!opts.dry_run && outcome.lessons.length) {
-      const m = store();
-      for (const lesson of outcome.lessons) {
-        m.memory.add(lesson.text, "reflection", lesson.importance, opts.project);
+    if (!opts.dry_run) {
+      if (outcome.lessons.length) {
+        const m = store();
+        for (const lesson of outcome.lessons) {
+          m.memory.add(lesson.text, "reflection", lesson.importance, opts.project);
+        }
+        m.memory.consolidate();
+        result.written += outcome.lessons.length;
       }
-      m.memory.consolidate();
-      result.written += outcome.lessons.length;
+      // Recorded even when the comparison yielded no lessons: the review has
+      // been accounted for, and re-reading it would find nothing new either.
+      if (review.id) {
+        ledger[review.id] = new Date().toISOString();
+        ledger_changed = true;
+      }
     }
+  }
+
+  if (ledger_changed) {
+    write_ledger(ledger_file, ledger);
   }
   return result;
 }

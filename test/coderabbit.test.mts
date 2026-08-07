@@ -379,7 +379,8 @@ describe("run_ingest", () => {
     assert.equal(entry.matched_run?.commit, HEAD);
     assert.equal(entry.score?.missed, 1);
     assert.equal(entry.lessons.length, 1);
-    assert.match(entry.lessons[0].text, /Look harder in src\/auth\/\*\* .*coderabbit raised/);
+    assert.match(entry.lessons[0].text, /Look harder in src\/auth\/\*\*/);
+    assert.equal(entry.lessons[0].raised_by, "coderabbit");
 
     // And it reached the store the next review will read.
     assert.equal(result.written, 1);
@@ -417,6 +418,38 @@ describe("run_ingest", () => {
     assert.equal(result.reviews[0].lessons.length, 0);
     assert.equal(result.written, 0);
     assert.ok(!fs.existsSync(default_memory_path(repo)));
+  });
+
+  it("does not re-learn a review it has already ingested", () => {
+    // Without a ledger, re-running ingest rewrote the same lessons and bumped
+    // each one's `seen` again — four real reviews reported a lesson as
+    // confirmed sixteen times, turning the confirmation signal into a count of
+    // how often the command had been typed.
+    const { repo, store } = fixture("- severity: low `src/perf/loop.mts` quadratic scan");
+
+    const first = run(repo, store);
+    assert.equal(first.written, 1);
+    const seen_once = new JsonlVectorDB(default_memory_path(repo)).records()[0].seen;
+
+    const second = run(repo, store);
+    assert.match(second.reviews[0].skipped_reason!, /already ingested/);
+    assert.equal(second.written, 0);
+    assert.equal(new JsonlVectorDB(default_memory_path(repo)).records()[0].seen, seen_once);
+  });
+
+  it("re-learns when explicitly asked", () => {
+    const { repo, store } = fixture("- severity: low `src/perf/loop.mts` quadratic scan");
+    run(repo, store);
+    const again = run(repo, store, { reingest: true });
+    assert.equal(again.written, 1);
+    assert.equal(again.reviews[0].skipped_reason, undefined);
+  });
+
+  it("records a dry run in nothing at all", () => {
+    const { repo, store } = fixture("- severity: low `src/perf/loop.mts` quadratic scan");
+    run(repo, store, { dry_run: true });
+    // A dry run must not consume the review — the real ingest still has to work.
+    assert.equal(run(repo, store).written, 1);
   });
 
   it("writes nothing on a dry run", () => {

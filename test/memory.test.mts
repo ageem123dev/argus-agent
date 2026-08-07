@@ -33,7 +33,11 @@ function tmp_file(): string {
 
 describe("tokenize / score_overlap", () => {
   it("splits paths into terms so diff headers can match a directory lesson", () => {
-    assert.deepEqual(tokenize("a/src/auth/token.mts").sort(), ["auth", "token"]);
+    // "src" is kept: short path segments (app, api, db, lib) are what separate
+    // one directory lesson from another. The extension is not — every path in
+    // the repo ends in one.
+    assert.deepEqual(tokenize("a/src/auth/token.mts").sort(), ["auth", "src", "token"]);
+    assert.deepEqual(tokenize("app/quarantine/page.tsx").sort(), ["app", "quarantine", "page"].sort());
   });
 
   it("drops corpus-wide noise words", () => {
