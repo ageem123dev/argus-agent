@@ -353,6 +353,14 @@ const INGEST_INPUT = {
     .boolean()
     .default(false)
     .describe("Compare and report without writing anything to memory."),
+  reingest: z
+    .boolean()
+    .default(false)
+    .describe(
+      "Re-learn from reviews already ingested. Off by default: ingestion is idempotent, so " +
+        "calling this tool repeatedly over an unchanged review reports it as skipped rather " +
+        "than re-writing its lessons. Set true only to rebuild after the distillation changes.",
+    ),
 };
 
 const INGEST_OUTPUT = {
@@ -416,6 +424,7 @@ server.registerTool(
         severities: args.severities,
         commit: args.commit,
         dry_run: args.dry_run,
+        reingest: args.reingest,
       });
     } catch (e) {
       // run_ingest is written not to throw; if it ever does, report it as a
