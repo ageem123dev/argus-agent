@@ -26,6 +26,7 @@ import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { make_finding, strip_markdown, type Finding } from "../findings.mjs";
+import { parse_coderabbit_cli_reviews } from "./coderabbit-cli.mjs";
 import type { FindingsAdapter } from "../ingest.mjs";
 
 /**
@@ -186,7 +187,7 @@ export function load_reviews(target: string, opts: CodeRabbitParseOptions = {}):
     files = fs.statSync(target).isDirectory()
       ? fs
           .readdirSync(target)
-          .filter((f) => f.toLowerCase().endsWith(".json"))
+          .filter((f) => /\.jsonl?$/i.test(f))
           .map((f) => path.join(target, f))
       : [target];
   } catch {
@@ -201,7 +202,13 @@ export function load_reviews(target: string, opts: CodeRabbitParseOptions = {}):
     } catch {
       continue;
     }
-    for (const review of parse_coderabbit_reviews(raw, opts)) {
+    // The extension's shape first, then the CLI's agent-mode event stream.
+    // Sniffing here rather than at each call site means every consumer of
+    // load_reviews gains CLI support without knowing the difference.
+    let reviews = parse_coderabbit_reviews(raw, opts);
+    if (reviews.length === 0) reviews = parse_coderabbit_cli_reviews(raw, opts);
+
+    for (const review of reviews) {
       loaded.push({ ...review, file });
     }
   }
