@@ -18,21 +18,34 @@
  *     codegenInstructions   agent-oriented fix guidance
  *     suggestions           proposed fix commands or code
  *
- * Two things the documentation does NOT specify, both handled defensively and
- * both worth confirming against a real capture:
+ * Confirmed against a real capture (CLI 0.7.2, `--base main --committed
+ * --agent`, 10 findings). Three things the documentation does not say, and all
+ * three matter:
  *
- *   1. **Line numbers.** No line field is documented on `finding`. Several
- *      plausible spellings are accepted below. If findings really are
- *      file-level, ingest still works — the partitioner falls back from
- *      path+line to path+topic — but matches get coarser, so a genuine miss and
- *      a near-miss become harder to tell apart.
+ *   1. **There is no `comment` field.** Only `codegenInstructions` and
+ *      `suggestions` are present. The documented fallback is the only path.
  *
- *   2. **The commit.** `review_context` is the only event that could carry it,
- *      and its fields are undocumented. This matters more than it looks: ingest
- *      joins reviews to Argus runs on commit SHA and *skips* a review it cannot
- *      join, so a stream with no commit teaches nothing and says so only in the
- *      run report. `head_commit` is left undefined rather than guessed, so the
- *      skip is visible; callers can pass `commit` explicitly to override.
+ *   2. **`codegenInstructions` opens with a fixed preamble**, identical on every
+ *      finding ("Verify each finding against current code. …"). Taking the first
+ *      line as the title gave all ten findings the *same* title, which would
+ *      have collapsed every comparison into one topic. The real claim is the
+ *      paragraph after it, in the form
+ *      `In @<path> around lines 122 - 128, <claim>`.
+ *
+ *   3. **There is no line field, but there are line numbers** — in that prose.
+ *      Parsing them back out restores path+line matching; without it the
+ *      partitioner falls back to path+topic and a genuine miss becomes hard to
+ *      tell from a near-miss. 10/10 findings carried a range.
+ *
+ * And one thing the stream genuinely does not carry:
+ *
+ *   **The commit.** `review_context` holds only `baseBranch`, `currentBranch`,
+ *   `reviewType` and `workingDirectory`. Ingest joins reviews to Argus runs on
+ *   commit SHA and *skips* what it cannot join, so a CLI review ingested without
+ *   help teaches nothing — quietly. `head_commit` is left undefined rather than
+ *   guessed, and **the caller must pass `commit` to `argus_ingest`**, captured
+ *   with `git rev-parse HEAD` at review time. A guessed commit would be worse
+ *   than none: it would score Argus against a review of different code.
  *
  * As with the sibling adapter, every field is optional regardless. This is
  * another tool's output, and it will drift.
@@ -163,7 +176,7 @@ export function extract_events(raw: string): Event[] {
   return events;
 }
 
-/** First non-empty line of the comment, markdown stripped. */
+/** First non-empty line, markdown stripped. */
 function title_of(text: string): string {
   const first = String(text)
     .split("\n")
@@ -172,19 +185,66 @@ function title_of(text: string): string {
   return first ?? "";
 }
 
+/**
+ * The fixed instruction block the CLI prepends to every `codegenInstructions`.
+ * Matched on its opening sentence rather than the whole paragraph, which reads
+ * like prompt text and will be reworded.
+ */
+const PREAMBLE = /^\s*Verify each finding against current code\.[^\n]*\n+/;
+
+/**
+ * The claim itself: `In @<path> around lines 122 - 128, <claim>`.
+ *
+ * The line range is the only place a line number appears anywhere in the
+ * stream. Both the `@` and the end of the range are optional — a single-line
+ * finding writes "around line 42".
+ */
+const CLAIM = /^\s*In\s+@?(\S+?)\s+around\s+lines?\s+(\d+)\s*(?:[-–—]\s*(\d+)\s*)?,\s*([\s\S]*)$/i;
+
+interface ParsedInstructions {
+  title: string;
+  line?: number;
+}
+
+/**
+ * Recovers the claim and its line number from the instruction prose.
+ *
+ * Exported for testing: this is the part most likely to break when CodeRabbit
+ * rewords its instruction template, and a break here is silent — every finding
+ * would still parse, they would just all share the preamble as their title and
+ * collapse into a single topic.
+ */
+export function parse_instructions(text: string): ParsedInstructions {
+  const withoutPreamble = String(text ?? "").replace(PREAMBLE, "");
+
+  const match = CLAIM.exec(withoutPreamble);
+  if (match) {
+    const [, , start, , claim] = match;
+    const title = title_of(claim ?? "");
+    if (title !== "") {
+      return { title, line: start ? Number(start) : undefined };
+    }
+  }
+
+  // Unrecognised shape: fall back to the first line of whatever remains after
+  // the preamble. Worse than a parsed claim, still better than the preamble.
+  return { title: title_of(withoutPreamble) };
+}
+
 function finding_from_event(event: Event): Finding | undefined {
   const raw_severity = first_string(event, ["severity"]);
-  // `comment` is the human-readable claim; `codegenInstructions` is fix
-  // guidance and is the documented fallback when `comment` is absent.
+  // No `comment` field exists in practice, despite the documentation; the
+  // instructions are the only prose the stream carries.
   const body =
     first_string(event, ["comment"]) ?? first_string(event, ["codegenInstructions"]) ?? "";
-  const title = title_of(body);
+  const { title, line } = parse_instructions(body);
   if (title === "") return undefined;
 
   return make_finding({
     source: "coderabbit",
     path: first_string(event, ["fileName", "filename", "file", "path"]),
-    line: first_number(event, LINE_KEYS),
+    // A real field would win if one ever appears; today the prose is all there is.
+    line: first_number(event, LINE_KEYS) ?? line,
     severity: raw_severity ? CODERABBIT_CLI_SEVERITY[raw_severity.toLowerCase()] : undefined,
     raw_severity,
     title,
@@ -253,6 +313,12 @@ export function parse_coderabbit_cli_reviews(
       base_commit: first_string(context, BASE_COMMIT_KEYS),
       started_at: first_string(context, ["startedAt", "started_at", "timestamp"]),
       ended_at: first_string(complete, ["endedAt", "ended_at", "timestamp"]),
+      // What the run actually looked at. The sibling adapter reconstructs this
+      // from fileReviewMap so a caller can tell "reviewed and clean" from "never
+      // reviewed"; the CLI states it outright on `complete`.
+      reviewed_files: Array.isArray(complete["reviewedFiles"])
+        ? (complete["reviewedFiles"] as unknown[]).filter((f): f is string => typeof f === "string")
+        : undefined,
       findings,
       filtered_out,
     },

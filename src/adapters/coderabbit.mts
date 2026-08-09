@@ -54,6 +54,13 @@ export interface CodeRabbitReview {
   findings: Finding[];
   /** Findings dropped by the severity filter, so a silent cap stays visible. */
   filtered_out: number;
+  /**
+   * Paths the run actually examined, when the source states them.
+   *
+   * The difference between "reviewed and clean" and "never looked at" is not
+   * recoverable from a finding list, and only the second is a coverage gap.
+   */
+  reviewed_files?: string[];
 }
 
 export interface CodeRabbitParseOptions {

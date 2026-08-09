@@ -8,14 +8,16 @@ import {
 } from "../src/adapters/coderabbit-cli.mjs";
 
 /**
- * These fixtures are built from the CLI reference's documented event and field
- * names, NOT from a captured run — the CLI is Linux/macOS only and could not be
- * executed on the machine this was written on.
+ * Two kinds of fixture here, and the difference matters.
  *
- * So: the field names below are documented, the *values* are invented, and two
- * things the docs do not specify are guessed defensively — line numbers on a
- * finding, and where the commit lives on review_context. Confirm both against a
- * real capture before trusting an ingest run that depends on them.
+ * The hand-built ones below are shaped from the CLI reference's documented
+ * field names. They pin behaviour that is easy to state and easy to get wrong:
+ * severity mapping, what counts as a clean review versus unreadable output,
+ * tolerance of shapes other than newline-delimited.
+ *
+ * They cannot catch a wrong assumption about the real output, because they
+ * encode the same assumption. The real capture at the bottom of this file can,
+ * and did — see the note there.
  */
 
 const line = (event: unknown): string => JSON.stringify(event);
@@ -201,4 +203,84 @@ test("braces inside strings do not split an event", () => {
 
   assert.equal(events.length, 1);
   assert.equal(events[0]!["comment"], tricky.comment);
+});
+
+/**
+ * Against a real capture — CLI 0.7.2, `--base main --committed --agent`, taken
+ * from the HOA-Treasurer-Assistant repo on 2026-08-09.
+ *
+ * The fixtures above are hand-built from documented field names and cannot
+ * catch a wrong assumption about the real output. This one can, and did: the
+ * first version of this adapter took the first line of `codegenInstructions` as
+ * the title, and every finding in this capture would have been titled with the
+ * same boilerplate preamble.
+ */
+import * as fs from "node:fs";
+import * as path from "node:path";
+import { fileURLToPath } from "node:url";
+
+const CAPTURE = fs.readFileSync(
+  path.join(path.dirname(fileURLToPath(import.meta.url)), "fixtures-cr-cli.jsonl"),
+  "utf-8",
+);
+
+test("real capture: parses into one completed review", () => {
+  const reviews = parse_coderabbit_cli_reviews(CAPTURE);
+
+  assert.equal(reviews.length, 1);
+  assert.equal(reviews[0]!.status, "review_completed");
+  assert.equal(reviews[0]!.findings.length, 10);
+});
+
+test("real capture: every finding gets its own title, not the shared preamble", () => {
+  const [review] = parse_coderabbit_cli_reviews(CAPTURE);
+  const titles = review!.findings.map((f) => f.title);
+
+  assert.equal(new Set(titles).size, titles.length, "titles collapsed — preamble leaked in");
+  for (const title of titles) {
+    assert.doesNotMatch(title, /^Verify each finding/, "preamble used as a title");
+  }
+});
+
+test("real capture: a line number is recovered for every finding", () => {
+  const [review] = parse_coderabbit_cli_reviews(CAPTURE);
+
+  for (const finding of review!.findings) {
+    assert.equal(typeof finding.line, "number", `no line for ${finding.path}`);
+  }
+});
+
+test("real capture: every finding names a file", () => {
+  const [review] = parse_coderabbit_cli_reviews(CAPTURE);
+
+  for (const finding of review!.findings) {
+    assert.ok(finding.path && finding.path.length > 0);
+  }
+});
+
+test("real capture: reviewed_files records coverage the finding list cannot", () => {
+  const [review] = parse_coderabbit_cli_reviews(CAPTURE);
+
+  // 25 files examined, 10 with findings: the other 15 are reviewed-and-clean,
+  // which is exactly the distinction a finding list cannot express.
+  assert.equal(review!.reviewed_files?.length, 25);
+  assert.ok(review!.reviewed_files!.length > review!.findings.length);
+});
+
+/**
+ * The stream carries no commit, so ingest cannot join this review to an Argus
+ * run on its own. Asserted rather than merely documented: if a future CLI adds
+ * one, this fails and tells us to stop passing `commit` by hand.
+ */
+test("real capture: carries no commit, so the caller must supply one", () => {
+  const [review] = parse_coderabbit_cli_reviews(CAPTURE);
+
+  assert.equal(review!.head_commit, undefined);
+});
+
+test("real capture: severity filtering keeps CodeRabbit's own vocabulary", () => {
+  const [review] = parse_coderabbit_cli_reviews(CAPTURE, { severities: ["critical", "major"] });
+
+  assert.equal(review!.findings.length, 6, "6 major findings in this capture");
+  assert.equal(review!.filtered_out, 4, "4 trivial findings dropped and counted");
 });
