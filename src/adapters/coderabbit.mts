@@ -68,6 +68,24 @@ export interface CodeRabbitParseOptions {
   severities?: string[];
   /** Only reviews that finished. On by default — a partial review under-reports. */
   completed_only?: boolean;
+  /**
+   * The commit the capture is of.
+   *
+   * CLI streams record no SHA anywhere, so their join key can only come from
+   * the caller. Ignored by the extension format, which carries its own
+   * `headCommitId`. Never guessed: a wrong commit would score Argus against a
+   * review of different code, which is worse than not joining at all.
+   */
+  commit?: string;
+  /**
+   * Called with the reason a capture yielded no reviews.
+   *
+   * "Nothing to ingest" and "the review never finished" are the same empty
+   * result and opposite facts. Without a reason reaching the caller, the second
+   * is indistinguishable from a clean review — so the parser reports why it
+   * rejected something rather than only how much it returned.
+   */
+  on_problem?: (problem: string) => void;
 }
 
 /** First line of the comment, which CodeRabbit writes as a bold sentence. */
@@ -190,8 +208,10 @@ export interface LoadedReview extends CodeRabbitReview {
  */
 export function load_reviews(target: string, opts: CodeRabbitParseOptions = {}): LoadedReview[] {
   let files: string[];
+  let scanning_directory = false;
   try {
-    files = fs.statSync(target).isDirectory()
+    scanning_directory = fs.statSync(target).isDirectory();
+    files = scanning_directory
       ? fs
           .readdirSync(target)
           .filter((f) => /\.jsonl?$/i.test(f))
@@ -212,8 +232,40 @@ export function load_reviews(target: string, opts: CodeRabbitParseOptions = {}):
     // The extension's shape first, then the CLI's agent-mode event stream.
     // Sniffing here rather than at each call site means every consumer of
     // load_reviews gains CLI support without knowing the difference.
-    let reviews = parse_coderabbit_reviews(raw, opts);
-    if (reviews.length === 0) reviews = parse_coderabbit_cli_reviews(raw, opts);
+    //
+    // Reasons are reported against the file that produced them: a scan over a
+    // directory of many files is otherwise told only that something, somewhere,
+    // declined to parse.
+    const scoped: CodeRabbitParseOptions = {
+      ...opts,
+      on_problem: opts.on_problem ? (problem) => opts.on_problem!(`${file}: ${problem}`) : undefined,
+    };
+    let reviews = parse_coderabbit_reviews(raw, scoped);
+    let problem_reported = false;
+    if (reviews.length === 0) {
+      const watched: CodeRabbitParseOptions = {
+        ...scoped,
+        on_problem: (problem) => {
+          problem_reported = true;
+          scoped.on_problem?.(problem);
+        },
+      };
+      reviews = parse_coderabbit_cli_reviews(raw, watched);
+    }
+
+    // A named file that yielded nothing and explained nothing is a third case:
+    // not a capture at all — empty, truncated mid-object, or another tool's
+    // JSON. Silence there is the false-clean this pipeline must never produce.
+    // Only for an explicitly named file: a directory scan meets non-captures
+    // routinely (the extension keeps its own state beside the reviews), and
+    // reporting each one would bury the reasons that matter.
+    if (!scanning_directory && reviews.length === 0 && !problem_reported) {
+      scoped.on_problem?.(
+        raw.trim() === ""
+          ? "the file is empty — no review was captured"
+          : "not a CodeRabbit capture: neither the VS Code store's JSON nor a CLI event stream",
+      );
+    }
 
     for (const review of reviews) {
       loaded.push({ ...review, file });

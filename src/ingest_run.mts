@@ -66,6 +66,12 @@ export interface IngestRunResult {
   reviews: ReviewIngestResult[];
   /** Findings dropped by the severity filter across all reviews. */
   filtered_out: number;
+  /**
+   * Why a capture yielded no reviews — an unfinished review, an interrupted
+   * stream. Distinct from `config_problems`, and the difference between "no
+   * findings" and "no result" lives here.
+   */
+  source_problems: string[];
   written: number;
   memory_file?: string;
 }
@@ -125,13 +131,21 @@ export function run_ingest(opts: IngestRunOptions): IngestRunResult {
     missing_paths: paths.filter((p) => !fs.existsSync(p)),
     reviews: [],
     filtered_out: 0,
+    source_problems: [],
     written: 0,
   };
   if (!paths.length) {
     return result;
   }
 
-  const reviews = paths.flatMap((p) => load_reviews(p, { severities: source.severities }));
+  const reviews = paths.flatMap((p) =>
+    load_reviews(p, {
+      severities: source.severities,
+      // CLI streams carry no SHA; the join key can only come from the caller.
+      commit: opts.commit,
+      on_problem: (problem) => result.source_problems.push(problem),
+    }),
+  );
   if (!reviews.length) {
     return result;
   }
@@ -164,7 +178,11 @@ export function run_ingest(opts: IngestRunOptions): IngestRunResult {
     }
     const commit = opts.commit ?? review.head_commit;
     if (!commit) {
-      entry.skipped_reason = "the review names no commit";
+      entry.skipped_reason =
+        review.mode === "cli"
+          ? "a CLI stream records no commit — pass `commit` (git rev-parse HEAD at review time) " +
+            "so the review can be joined to the Argus run of the same code"
+          : "the review names no commit";
       continue;
     }
     const run = find_run_for_commit(runs, commit, opts.project);
@@ -259,13 +277,28 @@ export function format_ingest_report(r: IngestRunResult): string {
     return lines.join("\n");
   }
   if (!r.reviews.length) {
-    lines.push("  the store is there but holds no completed reviews yet.");
+    // Say which: "nothing has been reviewed yet" and "a review ran but did not
+    // finish" are the same empty list and opposite facts.
+    if (r.source_problems.length) {
+      lines.push("  no usable review found:");
+      for (const problem of r.source_problems) {
+        lines.push(`    ${problem}`);
+      }
+    } else {
+      lines.push("  the store is there but holds no completed reviews yet.");
+    }
     return lines.join("\n");
+  }
+  for (const problem of r.source_problems) {
+    lines.push(`  note: ${problem}`);
   }
 
   for (const entry of r.reviews) {
-    const commit = entry.review.head_commit?.slice(0, 8) ?? "?";
-    lines.push(`\n  review ${entry.review.id?.slice(0, 8) ?? "?"} over ${commit}`);
+    // The commit the review was *joined on*, which for a CLI capture comes from
+    // the caller rather than the stream. Reporting the stream's own field showed
+    // "over ?" on a join that had in fact succeeded.
+    const commit = (entry.matched_run?.commit ?? entry.review.head_commit)?.slice(0, 8) ?? "?";
+    lines.push(`\n  review ${entry.review.id?.slice(0, 12) ?? "?"} over ${commit}`);
     if (entry.skipped_reason) {
       lines.push(`    skipped: ${entry.skipped_reason}`);
       continue;

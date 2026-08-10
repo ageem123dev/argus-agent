@@ -50,8 +50,15 @@
  * As with the sibling adapter, every field is optional regardless. This is
  * another tool's output, and it will drift.
  */
+import { createHash } from "node:crypto";
+
 import { make_finding, strip_markdown, type Finding } from "../findings.mjs";
 import type { CodeRabbitParseOptions, CodeRabbitReview } from "./coderabbit.mjs";
+
+/** Short content hash, used to give an id-less capture a stable identity. */
+function digest(raw: string): string {
+  return createHash("sha256").update(String(raw), "utf-8").digest("hex").slice(0, 16);
+}
 
 /**
  * CodeRabbit's CLI severity words. The first four match the extension's; `info`
@@ -277,7 +284,8 @@ export function parse_coderabbit_cli_reviews(
   if (!recognised.some((k) => kinds.has(k))) return [];
 
   const context = typed.find((e) => e["type"] === "review_context") ?? {};
-  const complete = typed.find((e) => e["type"] === "complete") ?? {};
+  const complete_event = typed.find((e) => e["type"] === "complete");
+  const complete = complete_event ?? {};
 
   const keep = opts.severities?.map((s) => s.toLowerCase());
   let filtered_out = 0;
@@ -299,17 +307,39 @@ export function parse_coderabbit_cli_reviews(
 
   const status = first_string(complete, ["status"]) ?? first_string(context, ["status"]);
 
-  // `completed_only` defaults on in the sibling adapter, because a partial
-  // review under-reports and would score Argus against work that never
-  // finished. The CLI marks a skipped run explicitly.
-  if (opts.completed_only !== false && status === "review_skipped") return [];
+  // A partial review under-reports, and scoring Argus against work that never
+  // finished manufactures misses out of code the reviewer never read.
+  //
+  // The test is that the run positively declared itself complete — not merely
+  // that it failed to declare itself skipped. Checking only for
+  // "review_skipped" passed two shapes that must not pass: any other terminal
+  // status, and a stream that simply stops, which is what a crashed or
+  // still-running review looks like. Both then read as a finished review, which
+  // is the false-clean this pipeline exists to refuse.
+  if (opts.completed_only !== false && status !== "review_completed") {
+    opts.on_problem?.(
+      complete_event
+        ? `the review did not complete (status=${status ?? "unset"}) — nothing to ingest from it`
+        : "the stream ends without a `complete` event — the review was interrupted or is " +
+          "still running, so its findings are not a final result",
+    );
+    return [];
+  }
 
   return [
     {
-      id: first_string(context, ["reviewId", "id"]),
+      // The stream carries no review id, and the ingest ledger keys on one: a
+      // review with no id is recorded nowhere, so every re-run re-learns the
+      // same lessons and re-inflates their confirmation counts — the exact
+      // failure the ledger was added to stop. Content-addressing is the honest
+      // substitute. An identical capture is the same review; a re-run that
+      // found something different is genuinely a new one.
+      id: first_string(context, ["reviewId", "id"]) ?? `cli:${digest(raw)}`,
       status,
       mode: first_string(context, ["mode"]) ?? "cli",
-      head_commit: first_string(context, HEAD_COMMIT_KEYS),
+      // The stream's own field if it ever grows one, else the caller's. Both
+      // beat guessing, and `opts.commit` is exactly what the caller passed.
+      head_commit: first_string(context, HEAD_COMMIT_KEYS) ?? opts.commit,
       base_commit: first_string(context, BASE_COMMIT_KEYS),
       started_at: first_string(context, ["startedAt", "started_at", "timestamp"]),
       ended_at: first_string(complete, ["endedAt", "ended_at", "timestamp"]),

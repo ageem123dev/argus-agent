@@ -33,7 +33,14 @@ const REVIEW_CONTEXT = {
   startedAt: "2026-08-08T10:00:00.000Z",
 };
 
-const COMPLETE = { type: "complete", status: "completed", findings: 2 };
+/**
+ * `review_completed`, not `completed` — the word a real capture uses. The
+ * invented fixtures guessed the shorter one, which is the same class of error
+ * that made the title and line-number guesses wrong: it read as a finished
+ * review to a guard that only rejected `review_skipped`, and would have read as
+ * an unfinished one to a guard that demands the real word.
+ */
+const COMPLETE = { type: "complete", status: "review_completed", findings: 2 };
 
 const CRITICAL_FINDING = {
   type: "finding",
@@ -127,12 +134,70 @@ test("unrecognisable output yields no reviews at all", () => {
   assert.deepEqual(parse_coderabbit_cli_reviews('[{"categories":["a","b"]}]'), []);
 });
 
-test("a skipped review is not scored", () => {
+test("a skipped review is not scored, and says so", () => {
+  const problems: string[] = [];
   const reviews = parse_coderabbit_cli_reviews(
     stream(REVIEW_CONTEXT, { type: "complete", status: "review_skipped", findings: 0 }),
+    { on_problem: (p) => problems.push(p) },
   );
 
   assert.deepEqual(reviews, [], "a skipped run must not count as a clean review");
+  // Asserting the reason, not merely the emptiness: an empty array proves the
+  // guard produced nothing, not that it fired for the right reason -- a broken
+  // parser returns empty too.
+  assert.ok(problems.join(" ").includes("did not complete (status=review_skipped)"));
+});
+
+test("any terminal status other than review_completed is refused", () => {
+  // The guard used to test only for "review_skipped", so every other outcome --
+  // a failed run, a cancelled one, a word the CLI has yet to invent -- read as a
+  // finished review and was scored as though the reviewer had seen the code.
+  for (const status of ["review_failed", "review_cancelled", "rate_limited"]) {
+    const problems: string[] = [];
+    const reviews = parse_coderabbit_cli_reviews(
+      stream(REVIEW_CONTEXT, CRITICAL_FINDING, { type: "complete", status }),
+      { on_problem: (p) => problems.push(p) },
+    );
+    assert.deepEqual(reviews, [], `${status} must not count as a finished review`);
+    assert.ok(problems.join(" ").includes(`did not complete (status=${status})`));
+  }
+});
+
+test("a stream that stops before completing is refused", () => {
+  // What a crashed or still-running review looks like: findings, then nothing.
+  // Scored naively it is a finished review that happened to find less.
+  const problems: string[] = [];
+  const reviews = parse_coderabbit_cli_reviews(stream(REVIEW_CONTEXT, CRITICAL_FINDING), {
+    on_problem: (p) => problems.push(p),
+  });
+
+  assert.deepEqual(reviews, []);
+  assert.match(problems.join(" "), /ends without a .complete. event/);
+});
+
+test("a capture gets a stable identity so it is ingested once", () => {
+  // The stream carries no review id, and the ingest ledger keys on one. With no
+  // id the ledger records nothing, so every re-run re-learns the same lessons
+  // and re-inflates the counts that are supposed to mean independent
+  // confirmation.
+  const capture = stream(REVIEW_CONTEXT, CRITICAL_FINDING, COMPLETE);
+  const first = parse_coderabbit_cli_reviews(capture)[0]!;
+  const again = parse_coderabbit_cli_reviews(capture)[0]!;
+
+  assert.ok(first.id, "a capture with no review id must still be identifiable");
+  assert.equal(first.id, again.id, "the same capture is the same review");
+
+  const different = parse_coderabbit_cli_reviews(
+    stream(REVIEW_CONTEXT, CRITICAL_FINDING, MINOR_FINDING, COMPLETE),
+  )[0]!;
+  assert.notEqual(first.id, different.id, "a re-run that found more is a new review");
+});
+
+test("the caller's commit becomes the join key the stream lacks", () => {
+  const [review] = parse_coderabbit_cli_reviews(stream(CRITICAL_FINDING, COMPLETE), {
+    commit: "7bfcb82f00112233445566778899aabbccddeeff",
+  });
+  assert.equal(review!.head_commit, "7bfcb82f00112233445566778899aabbccddeeff");
 });
 
 /**

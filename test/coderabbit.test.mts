@@ -186,6 +186,43 @@ describe("load_reviews", () => {
   });
 });
 
+describe("naming a file that is not a capture", () => {
+  // Pointing at a file and being told nothing is the false-clean this pipeline
+  // exists to refuse: zero reviews reads identically to a clean review. Each
+  // case asserts its own reason, because an empty result proves only that
+  // something returned nothing -- a broken parser does that too.
+  const capture = (body: string) => {
+    const dir = scratch("named");
+    const file = path.join(dir, "cr.jsonl");
+    fs.writeFileSync(file, body, "utf-8");
+    const problems: string[] = [];
+    const reviews = load_reviews(file, { on_problem: (p) => problems.push(p) });
+    return { reviews, problems: problems.join(" ") };
+  };
+
+  it("says an empty file is empty", () => {
+    const { reviews, problems } = capture("");
+    assert.deepEqual(reviews, []);
+    assert.match(problems, /the file is empty/);
+  });
+
+  it("says unreadable content is not a capture", () => {
+    const { reviews, problems } = capture("garbage not json");
+    assert.deepEqual(reviews, []);
+    assert.match(problems, /not a CodeRabbit capture/);
+  });
+
+  it("stays silent about non-captures met while scanning a directory", () => {
+    // The extension keeps categories.json beside its reviews. Reporting every
+    // such file would bury the reasons that matter.
+    const dir = scratch("store");
+    fs.writeFileSync(path.join(dir, "categories.json"), '{"default-reviewType":"review"}', "utf-8");
+    const problems: string[] = [];
+    load_reviews(dir, { on_problem: (p) => problems.push(p) });
+    assert.deepEqual(problems, []);
+  });
+});
+
 describe("configuration", () => {
   it("defaults to recording critical and major only", () => {
     const { config } = load_config(scratch("repo"), { env: {} });

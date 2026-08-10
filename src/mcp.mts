@@ -389,6 +389,12 @@ const INGEST_OUTPUT = {
   memory_file: z.string().optional(),
   config_sources: z.array(z.string()),
   config_problems: z.array(z.string()),
+  /**
+   * Why a capture yielded no reviews -- an unfinished review, an interrupted
+   * stream, a file that is not a capture. Distinct from config_problems, and
+   * the difference between "no findings" and "no result" lives here.
+   */
+  source_problems: z.array(z.string()),
   /** Why each unusable review was skipped, so a null result is explainable. */
   skipped: z.array(z.object({ review: z.string(), reason: z.string() })),
 };
@@ -462,6 +468,7 @@ server.registerTool(
       memory_file: result.memory_file,
       config_sources: result.config_sources,
       config_problems: result.config_problems,
+      source_problems: result.source_problems,
       skipped: result.reviews
         .filter((r) => r.skipped_reason)
         .map((r) => ({ review: r.review.id ?? "?", reason: r.skipped_reason! })),
