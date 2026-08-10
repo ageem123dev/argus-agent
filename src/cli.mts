@@ -6,6 +6,10 @@
 //           [--offline] [--no-tools] [--no-refine]
 //           [--record <file>] [--no-record]
 //           [--memory <file>] [--no-memory]
+//           [--commit <sha>]   commit this diff is of; defaults to HEAD
+//
+//     argus ingest [--repo <path>] [--from <file|dir>] [--severities critical,major]
+//                  [--commit <sha>] [--dry-run]
 //
 // Outputs the review with every trace visible: perception selectivity,
 // action log, reflection convergence, collaboration meta, governance
@@ -32,6 +36,9 @@ import {
   resolve_commit,
 } from "./run_record.mjs";
 import { init } from "./init.mjs";
+import { parse_severities } from "./config.mjs";
+import { collect_diff, describe_diff } from "./diff.mjs";
+import { format_ingest_report, run_ingest } from "./ingest_run.mjs";
 
 const PROVIDERS = ["auto", "antigravity", "antigravity-shim", "anthropic", "offline"] as const;
 type Provider = (typeof PROVIDERS)[number];
@@ -51,6 +58,14 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
       "no-record": { type: "boolean", default: false },
       memory: { type: "string" },
       "no-memory": { type: "boolean", default: false },
+      from: { type: "string" },
+      severities: { type: "string" },
+      commit: { type: "string" },
+      "dry-run": { type: "boolean", default: false },
+      reingest: { type: "boolean", default: false },
+      base: { type: "string" },
+      "no-untracked": { type: "boolean", default: false },
+      out: { type: "string" },
       force: { type: "boolean", default: false },
     },
   });
@@ -71,6 +86,61 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
     return 0;
   }
 
+  // `argus diff` — gather what a review should be shown: the branch's own
+  // work plus anything uncommitted, including files git does not track yet.
+  // In Node rather than the slash command's shell, because the untracked
+  // pass is a loop that does not survive a Windows shell, and because the
+  // MCP tool needs exactly the same thing.
+  if (positionals[0] === "diff") {
+    const repo_root = values.repo as string;
+    const collected = collect_diff(repo_root, {
+      base: (values.base as string | undefined) ?? undefined,
+      include_untracked: !values["no-untracked"],
+    });
+    const out = values.out as string | undefined;
+    if (out) {
+      fs.mkdirSync(path.dirname(path.resolve(out)), { recursive: true });
+      fs.writeFileSync(out, collected.diff, "utf-8");
+      console.error(`argus diff: ${describe_diff(collected)}`);
+    } else {
+      process.stdout.write(collected.diff);
+    }
+    // An empty diff is a fact, not a failure: on a freshly committed branch
+    // with a clean tree there is genuinely nothing to review. Saying so beats
+    // handing the reviewer an empty file and letting it look broken.
+    if (!collected.diff.trim()) {
+      console.error(
+        "argus diff: nothing to review — no commits on this branch beyond its base, " +
+          "no uncommitted changes, and no untracked files.",
+      );
+      return 3;
+    }
+    return 0;
+  }
+
+  // `argus ingest` — compare a CodeRabbit review against the Argus run over
+  // the same commit, and learn from what Argus missed.
+  if (positionals[0] === "ingest") {
+    const repo_root = values.repo as string;
+    const report = run_ingest({
+      repo_root,
+      project: values.project || path.basename(path.resolve(repo_root)),
+      from: (values.from as string | undefined) ?? positionals[1],
+      severities: parse_severities(values.severities as string | undefined),
+      commit: values.commit as string | undefined,
+      dry_run: values["dry-run"] as boolean,
+      reingest: values.reingest as boolean,
+      record_file: values.record as string | undefined,
+      memory_file: values.memory as string | undefined,
+    });
+    console.log(format_ingest_report(report));
+    // Non-zero for a misconfiguration only. An existing store with nothing in
+    // it yet is a legitimate no-op, not a failure.
+    const unusable =
+      !report.paths.length || report.missing_paths.length === report.paths.length;
+    return unusable ? 1 : 0;
+  }
+
   const diff_file = positionals[0];
   if (!diff_file) {
     console.error(
@@ -78,8 +148,11 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
         `                 [--provider ${PROVIDERS.join("|")}]\n` +
         "                 [--offline] [--no-tools] [--no-refine]\n" +
         "                 [--record <file>] [--no-record]\n" +
-        "                 [--memory <file>] [--no-memory]\n" +
-        "       argus init [repo] [--force]   scaffold Claude Code integration",
+        "                 [--memory <file>] [--no-memory] [--commit <sha>]\n" +
+        "       argus init [repo] [--force]   scaffold Claude Code integration\n" +
+        "       argus ingest [--repo <path>] [--from <file|dir>]\n" +
+        "                 [--severities critical,major] [--commit <sha>] [--dry-run]\n" +
+        "                 learn from a CodeRabbit review of the same commit",
     );
     return 2;
   }
@@ -159,6 +232,14 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
 
   const review = outcome.review!;
   const p_trace = outcome.perception_trace!;
+  // A provider can return successfully and still yield nothing. Silence here
+  // reads as "clean diff" when it means "the review did not happen".
+  if (!review.verdict.trim()) {
+    console.error(
+      `warning: provider "${provider}" returned an empty verdict — this is a failed review, ` +
+        "not a clean one. Re-run before relying on it or ingesting against it.",
+    );
+  }
   // routing_tier (what picked the model) is reported separately from complexity
   // (what the model thought of the change) — they routinely disagree.
   const tier = review.routing_tier ? `, tier=${review.routing_tier}` : "";
@@ -207,7 +288,10 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
     const record = build_run_record(outcome, {
       project,
       repo_root,
-      commit: resolve_commit(repo_root),
+      // --commit names the commit this diff is *of*. Without it a review of a
+      // historical diff records whatever HEAD happens to be, which then joins
+      // to the wrong review during ingestion — or to none at all.
+      commit: (values.commit as string | undefined) ?? resolve_commit(repo_root),
       provider,
       invoked_via: "cli",
       calls: agy_calls,

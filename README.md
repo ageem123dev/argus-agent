@@ -15,6 +15,12 @@ src/
 ├── perception.mts     # context gathering: modified files → imports → tests → config, token-budgeted
 ├── memory.mts         # 3-tier hierarchical memory + lesson distillation + ArgusMemory
 ├── memory_store.mts   # durable lesson store (.argus/memory.jsonl)
+├── findings.mts       # one normalized Finding shape, whoever produced it
+├── ingest.mts         # three-way partition against a second reviewer + scoring
+├── ingest_run.mts     # `argus ingest` — compare, score, learn from the misses
+├── config.mts         # argus.config.json + .argus/config.json + env, layered
+├── adapters/
+│   └── coderabbit.mts   # CodeRabbit's VS Code review store
 ├── reasoning.mts      # complexity routing + chain-of-thought + verify + ArgusReasoning (+ OfflineReasoning)
 ├── action.mts         # toolbox + guardrail sandwich (pre/HITL/post checks) + ArgusAction
 ├── reflection.mts     # generator-critic loop + skill library + experience replay + ArgusReflection
@@ -89,6 +95,15 @@ What this build adds on top:
 
 ```sh
 node dist/cli.mjs my-change.diff --project my-app --repo /path/to/repo
+```
+
+Reviewing a diff that isn't `HEAD` — a past commit, or a range — needs `--commit
+<sha>` to name what the diff is *of*. Without it the run record claims whatever
+`HEAD` happens to be, and ingestion then joins it to the wrong review, or to none:
+
+```sh
+git -C repo diff <base>..<head> > change.diff
+node dist/cli.mjs change.diff --repo repo --commit <head>
 ```
 
 ## Reasoning providers
@@ -196,6 +211,42 @@ that names the *locus* is a reason to read carefully. Watch `memory.recalled` an
 `memory.stored` in `.argus/runs.jsonl` alongside confidence over time — "it's learning"
 and "it's getting more credulous" look identical from a single run.
 
+**Lessons are scoped by language.** A finding's language comes from the file's
+extension, and it is part of what identifies a lesson — so a directory holding a
+schema and its documentation yields two lessons, not one:
+
+```
+[app] Look harder in SQL under db/migrations/** for injection and untrusted input.
+[app] Look harder in Markdown under db/migrations/**; past reviews have found defects there.
+```
+
+A directory does not imply a language — `components/feature/` routinely holds
+`.tsx`, `.css` and `.md` side by side — so recall matches on the **(language,
+place) pairs the change actually contains**, never on the two independently.
+Filtering them separately would make the Markdown lesson about a folder eligible
+for a change that touched only that folder's TypeScript, as long as the diff
+edited some Markdown anywhere; in a mixed repo that is nearly every commit.
+
+Three tiers, in order:
+
+1. lessons filed against a (language, place) the change contains — ranked by
+   severity, since all of them are already known to apply;
+2. lessons in a language the change uses, about places it did not touch — general
+   priors, which still transfer;
+3. never: a lesson about a place the change *did* edit, in a language it did not
+   write there.
+
+Measured across 18 real reviews, the share of recalled lessons pointing at code
+the change actually touched went 39% → 76% (querying on paths instead of a
+character prefix) → **94%** (pairing language with place). A Python-only change
+recalled three *TypeScript* lessons before scoping, matched purely on shared
+directory names, and none after — correct, when no Python lesson exists yet.
+
+Records written before languages were tracked carry none and stay eligible for
+every language, so an existing store degrades gracefully rather than going
+silent. Because lessons are a pure function of the run records and the ingested
+reviews, a store can always be regenerated after the distillation changes.
+
 The file is an append-only log: each upsert appends a line, later lines win on load, and
 it compacts to one line per lesson once it grows past ~4x. That keeps two concurrent
 reviews of the same repo from clobbering each other. Re-learning a lesson bumps its
@@ -206,6 +257,94 @@ review, and reports itself in the CLI's `=== Memory ===` block.
 
 Records are scoped by `project`, and `.argus/` is gitignored, so lessons are local to
 one checkout. Nothing syncs them to CI or another machine.
+
+## Learning from a second reviewer
+
+CodeRabbit runs over the same commits Argus does. Its findings partition three
+ways, and the sets mean different things:
+
+| Set | Meaning |
+| --- | --- |
+| agreed | both found it — confirmation, and the least interesting set |
+| missed | only CodeRabbit found it — **the supervised signal** |
+| argus_only | only Argus found it — unconfirmed: a false positive, or a catch CodeRabbit doesn't do |
+
+```sh
+node dist/cli.mjs ingest --repo /path/to/repo --dry-run   # compare, write nothing
+node dist/cli.mjs ingest --repo /path/to/repo             # and learn from the misses
+```
+
+The MCP server exposes this as **`argus_ingest`**, separate from `argus_review`,
+so an agent can invoke it on its own schedule. The two run on different clocks:
+a review happens while you are writing the change, ingestion happens after
+CodeRabbit has been over the same commit. Folding ingestion into review would
+make every review wait on a second reviewer that has usually not run yet.
+
+`argus_ingest` takes `repo_root`, `project`, `dry_run`, and — rarely needed, since
+they normally come from config — `from`, `severities`, and `commit`. It returns the
+same report as text plus a typed block: per-set totals, `recall`, `confirmed_rate`,
+`lessons_written`, `filtered_out`, and a `skipped` list giving a reason per unusable
+review, so a null result is always explainable.
+
+It reports a tool **error** when the store is missing or a configured path does not
+exist, and success when the store is merely empty. Both produce zero lessons, but
+only one is a misconfiguration — and a broken path must not read as "Argus missed
+nothing".
+
+Only `missed` becomes memory. Argus-only findings are deliberately *not* fed
+back — reinforcing a reviewer's own unconfirmed findings is how it talks itself
+into its false positives. `confirmed%` in the report is a **floor** on precision,
+not precision: watch it across runs rather than reading one.
+
+Reviews are joined to Argus runs on the commit SHA — CodeRabbit records
+`headCommitId`, Argus records `commit` in `runs.jsonl`. A review with no matching
+run is reported and skipped, never treated as all-misses.
+
+### Configuring it
+
+Nothing about the location is hardcoded, because none of it is stable: the VS
+Code extension writes under `workspaceStorage/<workspace-hash>/`, and the
+filename is a *content hash that rotates on every review*. Argus scans a
+directory and identifies reviews by reading them.
+
+Two files, layered — later wins, key by key:
+
+| Source | For |
+| --- | --- |
+| `argus.config.json` at the repo root | policy, meant to be committed |
+| `.argus/config.json` | machine-local paths (gitignored) |
+| `ARGUS_CODERABBIT_PATH`, `ARGUS_CODERABBIT_SEVERITIES` | environment |
+| `--from`, `--severities` | one invocation |
+
+```jsonc
+// argus.config.json — committed policy
+{ "ingest": { "coderabbit": { "severities": ["critical", "major"] } } }
+```
+
+```jsonc
+// .argus/config.json — this machine only
+{ "ingest": { "coderabbit": {
+  "path": "C:\\Users\\you\\AppData\\Roaming\\Code\\User\\workspaceStorage\\<hash>\\coderabbit.coderabbit-vscode"
+} } }
+```
+
+`severities` names CodeRabbit's own words — `critical`, `major`, `minor`,
+`trivial` — not Argus's, so the setting means what CodeRabbit's documentation
+means. It defaults to `critical, major`; everything below that is counted and
+reported as skipped rather than silently dropped. Internally they map to
+Argus's scale (`critical`, `high`, `low`, `nit`), which only sets how heavily a
+lesson weighs.
+
+With no `path` configured, Argus falls back to scanning VS Code's
+`workspaceStorage` and matching the repo against each workspace's
+`categories.json`, which is the only link from a workspace hash back to a
+checkout. That is a convenience for an unconfigured first run, not a contract —
+set `path` and none of it runs.
+
+Everything in this path is non-throwing. Malformed JSON, an unexpected shape, a
+missing directory, or a comment with no fields yields fewer findings and a
+report, never an exception: ingestion improves memory in the background and must
+not be able to break the thing it improves.
 
 ## Invoking from Claude Code
 
@@ -224,15 +363,16 @@ hardcoded — relative when Argus lives inside the target repo, absolute when it
 the review, and hands the output back for cross-checking. Extra flags pass straight
 through (`/argus-review --project my-app --no-refine`).
 
-**Autonomously — MCP server.** [`src/mcp.mts`](src/mcp.mts) exposes `argus_review` over
-stdio, so a calling agent can reach for a review mid-task. `init` registers it; by hand
-it would be:
+**Autonomously — MCP server.** [`src/mcp.mts`](src/mcp.mts) exposes two tools over
+stdio — `argus_review` to review a diff, and `argus_ingest` to learn from CodeRabbit's
+review of the same commit (see [above](#learning-from-a-second-reviewer)) — so a calling
+agent can reach for either mid-task. `init` registers the server; by hand it would be:
 
 ```sh
 claude mcp add argus -- node /path/to/argus-agent-ts/dist/mcp.mjs
 ```
 
-The tool takes `diff` (inline), `diff_file`, or `git_range` (default `HEAD`, and
+`argus_review` takes `diff` (inline), `diff_file`, or `git_range` (default `HEAD`, and
 `--staged` works), plus `repo_root`, `project`, `provider`, `refine`,
 `verify_with_tools`, `record`, and `memory`. It returns the review as text and a typed
 `structuredContent` block — verdict, complexity, confidence, perception selectivity,

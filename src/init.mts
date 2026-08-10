@@ -36,22 +36,43 @@ function mcp_json(cli_ref: string): string {
   )}\n`;
 }
 
+/**
+ * The slash command.
+ *
+ * Two things it must not do, both learned the hard way.
+ *
+ * It must not build the diff with `git diff HEAD`. That omits untracked files,
+ * so every file a story *adds* was invisible while the edits around it were
+ * not -- and it scopes to uncommitted work, so once the branch is committed
+ * the review sees nothing at all, which is exactly the state it runs in
+ * alongside a second reviewer working from the base branch.
+ *
+ * And it must not do that in shell. The untracked pass is a loop, and the loop
+ * does not survive a Windows shell. In Node it is one tested implementation,
+ * shared with the MCP tool rather than written twice.
+ *
+ * `allowed-tools` narrows to the single binary as a result: no mkdir, no git.
+ */
 function slash_command(cli_ref: string): string {
   return `---
-description: Run the Argus governed code review (Gemini via agy) on the working diff
+description: Run the Argus governed code review (Gemini via agy) on this branch's changes
 argument-hint: [extra argus flags, e.g. --project my-app --no-refine]
-allowed-tools: Bash(mkdir:*), Bash(git diff:*), Bash(node ${cli_ref}:*)
+allowed-tools: Bash(node ${cli_ref}:*)
 ---
 
-!\`mkdir -p .argus\`
-!\`git diff HEAD > .argus/pending.diff\`
+!\`node ${cli_ref} diff --repo . --out .argus/pending.diff\`
 !\`node ${cli_ref} .argus/pending.diff --provider antigravity $ARGUMENTS\`
 
-Above is Argus's review of the current working diff, produced by a *different* model
-family (Gemini, via the \`agy\` CLI) than the one reading this.
+Above is Argus's review, produced by a *different* model family (Gemini, via the
+\`agy\` CLI) than the one reading this.
+
+The diff covers this branch's committed work, anything uncommitted, and files git does
+not track yet -- the same body of code a reviewer running against the base branch sees.
+If the first command reported nothing to review, say so and stop rather than reviewing
+an empty diff.
 
 Summarize the findings grouped by severity. Before you accept any finding, open the
-cited file and confirm it — Argus reviews from a token-budgeted context slice, so it
+cited file and confirm it -- Argus reviews from a token-budgeted context slice, so it
 can cite a line it only partially saw, and it is a second opinion to check rather than
 ground truth. Say explicitly which findings you confirmed, which you could not
 reproduce, and which you disagree with. Then propose concrete fixes for the confirmed

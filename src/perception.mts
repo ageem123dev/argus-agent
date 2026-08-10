@@ -116,6 +116,17 @@ export function gather_review_context(
   return [selected, trace];
 }
 
+/**
+ * Repo-relative paths a unified diff touches, in order, deduplicated.
+ *
+ * Exported because memory retrieval needs exactly this: lessons are keyed by
+ * the directory a past finding sat in, so the paths a diff touches are the
+ * query, not a character-count prefix of the diff text.
+ */
+export function extract_modified_files(diff: string): string[] {
+  return _extract_modified_files(diff);
+}
+
 function _extract_modified_files(diff: string): string[] {
   const out: string[] = [];
   const re = /^\+\+\+ [ab]\/(.+)$/gm;

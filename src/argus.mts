@@ -15,7 +15,7 @@
  * Each step is observable via its own trace class; ReviewOutcome gathers
  * them all.
  */
-import { gather_review_context, PerceptionTrace } from "./perception.mjs";
+import { extract_modified_files, gather_review_context, PerceptionTrace } from "./perception.mjs";
 import { ArgusMemory, HierarchicalMemory } from "./memory.mjs";
 import { JsonlVectorDB, default_memory_path } from "./memory_store.mjs";
 import { ArgusReasoning, ReviewResult } from "./reasoning.mjs";
@@ -148,8 +148,26 @@ export class Argus {
     const [selected, p_trace] = gather_review_context(diff, repo_root, budget);
 
     // 3. memory (before) — recall prior lessons
+    //
+    // The query is every path the diff touches, not a prefix of the diff text.
+    // Slicing the first 300 characters saw one file header, so recall was
+    // decided by whichever lesson happened to share a token with the
+    // alphabetically-first changed file: measured over 18 real reviews, 61% of
+    // recalled lessons pointed at directories the diff never touched. Lessons
+    // are keyed by locus, so the set of changed paths is the natural query.
+    //
+    // The paths also scope recall by language and place together. A directory
+    // does not imply a language — .tsx, .css and .md sit side by side — so a
+    // lesson about the Markdown in a folder must not surface for a change that
+    // touched only the TypeScript there.
+    const changed = extract_modified_files(diff);
     const past_lessons = remember
-      ? this.memory.before_review(project, diff.slice(0, 300).replaceAll("\n", " "))
+      ? this.memory.before_review(
+          project,
+          changed,
+          // Only when the diff named no files at all.
+          changed.length ? undefined : diff.slice(0, 300),
+        )
       : [];
 
     // 4. collaboration — fan out to sub-agents on complex diffs

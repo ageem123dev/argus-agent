@@ -17,7 +17,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 
-import { rank_by_overlap, type MemorySearchFilter, type VectorDB } from "./memory.mjs";
+import { rank_scoped, type MemorySearchFilter, type VectorDB } from "./memory.mjs";
 
 /** One durable lesson. */
 export interface MemoryRecord {
@@ -25,6 +25,10 @@ export interface MemoryRecord {
   importance: number;
   source: string;
   project?: string;
+  /** Absent on records written before languages were tracked. */
+  language?: string;
+  /** The place the lesson applies to; paired with `language` to scope recall. */
+  locus?: string;
   /** ISO-8601, UTC. */
   created_at: string;
   updated_at: string;
@@ -103,6 +107,8 @@ export class JsonlVectorDB implements VectorDB {
       importance: prior ? Math.max(prior.importance, importance) : importance,
       source: relearned ? source : (prior?.source ?? source),
       project: (metadata?.project as string | undefined) ?? prior?.project,
+      language: (metadata?.language as string | undefined) ?? prior?.language,
+      locus: (metadata?.locus as string | undefined) ?? prior?.locus,
       created_at: prior?.created_at ?? stamp,
       updated_at: stamp,
       seen: (prior?.seen ?? 0) + (relearned ? 1 : 0),
@@ -116,10 +122,14 @@ export class JsonlVectorDB implements VectorDB {
     top_k = 5,
     filter?: MemorySearchFilter,
   ): Array<{ text: string; score: number }> {
-    const pool = [...this._records.values()]
-      .filter((r) => !filter?.project || !r.project || r.project === filter.project)
-      .map((r) => ({ text: r.text, score: r.importance }));
-    return rank_by_overlap(pool, query, top_k);
+    const pool = [...this._records.values()].map((r) => ({
+      text: r.text,
+      score: r.importance,
+      project: r.project,
+      language: r.language,
+      locus: r.locus,
+    }));
+    return rank_scoped(pool, query, top_k, filter).map((r) => ({ text: r.text, score: r.score }));
   }
 
   describe(): Record<string, unknown> {

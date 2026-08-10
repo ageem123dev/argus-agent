@@ -1,0 +1,9 @@
+{
+  "$comment": "Argus policy for this repo. Committed on purpose: this is project policy, not machine setup. Machine-specific paths belong in .argus/config.json, which is gitignored. Both are optional — see the README's 'Learning from a second reviewer' section.",
+  "ingest": {
+    "coderabbit": {
+      "$comment": "CodeRabbit's own severity words, not Argus's: critical, major, minor, trivial. Findings below these are counted and reported, never silently dropped. No 'path' is set here on purpose — Argus locates the VS Code review store itself, and the path contains a workspace hash and a per-review content hash that both rotate. Set ingest.coderabbit.path in .argus/config.json only if discovery fails.",
+      "severities": ["critical", "major"]
+    }
+  }
+}

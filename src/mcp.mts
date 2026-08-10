@@ -1,8 +1,16 @@
 #!/usr/bin/env node
 /**
- * Argus MCP server — exposes the governed review as a tool over stdio.
+ * Argus MCP server — exposes the agent's two operations as tools over stdio.
  *
  *     claude mcp add argus -- node /path/to/argus-agent-ts/dist/mcp.mjs
+ *
+ *   argus_review  run a governed review of a diff
+ *   argus_ingest  score a past review against CodeRabbit and learn the misses
+ *
+ * They are separate tools because they run on different clocks: a review
+ * happens while you are writing the change, ingestion happens after another
+ * reviewer has been over the same commit. Bundling ingestion into review would
+ * make every review wait on a second reviewer that has usually not run yet.
  *
  * Where the /argus-review slash command is something you invoke, this lets a
  * calling agent reach for a second-opinion review on its own mid-task.
@@ -31,6 +39,8 @@ import {
   default_record_path,
   resolve_commit,
 } from "./run_record.mjs";
+import { format_ingest_report, run_ingest } from "./ingest_run.mjs";
+import { collect_diff, describe_diff } from "./diff.mjs";
 
 const PROVIDERS = ["antigravity", "antigravity-shim", "anthropic", "offline"] as const;
 
@@ -63,8 +73,18 @@ const INPUT = {
     .string()
     .optional()
     .describe(
-      'Git revision or range to diff, e.g. "HEAD", "main...HEAD", or "--staged". ' +
-        'Defaults to "HEAD" when no diff, diff_file, or git_range is given.',
+      'Git revision or range to diff, e.g. "HEAD" or "main...HEAD". Raw git output, so it ' +
+        "does NOT include untracked files. Prefer leaving this unset: the default collects " +
+        "the branch's own work, the working tree, and untracked files together.",
+    ),
+  base: z
+    .string()
+    .optional()
+    .describe(
+      "Branch the change is measured from when no diff, diff_file, or git_range is given. " +
+        "Defaults to main, then master, then the working tree alone. The review then covers " +
+        "committed branch work and uncommitted work in one diff, matching what a reviewer " +
+        "running against the base branch sees. Pass an empty string for uncommitted work only.",
     ),
   repo_root: z
     .string()
@@ -149,8 +169,18 @@ server.registerTool(
         diff = args.diff;
       } else if (args.diff_file) {
         diff = fs.readFileSync(args.diff_file, "utf-8");
+      } else if (args.git_range) {
+        diff = await git_diff(repo_root, args.git_range);
       } else {
-        diff = await git_diff(repo_root, args.git_range ?? "HEAD");
+        // Not `git diff HEAD`: that omits untracked files, so every file the
+        // change *adds* was invisible while the edits around it were not -- and
+        // it goes empty the moment the branch is committed, which is exactly
+        // when a second reviewer is run against it.
+        const collected = collect_diff(repo_root, {
+          base: args.base === "" ? null : args.base,
+        });
+        diff = collected.diff;
+        console.error(`argus: ${describe_diff(collected)}`);
       }
     } catch (e) {
       return {
@@ -165,7 +195,10 @@ server.registerTool(
         content: [
           {
             type: "text" as const,
-            text: "The diff is empty — nothing to review. Check git_range, or pass diff/diff_file.",
+            text:
+              "The diff is empty — nothing to review: no commits on this branch beyond its " +
+              "base, nothing uncommitted, and no untracked files. Check base/git_range, or " +
+              "pass diff/diff_file.",
           },
         ],
       };
@@ -305,10 +338,192 @@ server.registerTool(
   },
 );
 
+// ---------------------------------------------------------------------------
+// argus_ingest
+// ---------------------------------------------------------------------------
+
+const INGEST_INPUT = {
+  repo_root: z
+    .string()
+    .default(".")
+    .describe("Repository root. Run records, the memory store, and config are read from here."),
+  project: z
+    .string()
+    .optional()
+    .describe("Project name for memory and run-record scoping. Defaults to the repo directory name."),
+  from: z
+    .string()
+    .optional()
+    .describe(
+      "Override the configured CodeRabbit path — a directory to scan, or one review file. " +
+        "Normally left unset: the path comes from .argus/config.json or ARGUS_CODERABBIT_PATH, " +
+        "and is discovered from VS Code's workspaceStorage when neither is set.",
+    ),
+  severities: z
+    .array(z.string())
+    .optional()
+    .describe(
+      "Override which CodeRabbit severities to record, in CodeRabbit's own vocabulary: " +
+        'critical, major, minor, trivial. Defaults to ["critical","major"].',
+    ),
+  commit: z
+    .string()
+    .optional()
+    .describe(
+      "Join every review to this commit instead of its own headCommitId. For re-scoring a " +
+        "review against a run it would not otherwise match; leave unset in normal use.",
+    ),
+  dry_run: z
+    .boolean()
+    .default(false)
+    .describe("Compare and report without writing anything to memory."),
+  reingest: z
+    .boolean()
+    .default(false)
+    .describe(
+      "Re-learn from reviews already ingested. Off by default: ingestion is idempotent, so " +
+        "calling this tool repeatedly over an unchanged review reports it as skipped rather " +
+        "than re-writing its lessons. Set true only to rebuild after the distillation changes.",
+    ),
+};
+
+const INGEST_OUTPUT = {
+  /** Directories or files reviews were read from. */
+  paths: z.array(z.string()),
+  /** True when `paths` came from scanning workspaceStorage rather than config. */
+  discovered: z.boolean(),
+  severities: z.array(z.string()),
+  reviews_found: z.number(),
+  reviews_compared: z.number(),
+  reviews_skipped: z.number(),
+  /** Totals across every compared review. */
+  agreed: z.number(),
+  missed: z.number(),
+  argus_only: z.number(),
+  /** agreed / (agreed + missed): of what CodeRabbit found, how much Argus caught. */
+  recall: z.number().optional(),
+  /** A floor on precision, not precision — see the tool description. */
+  confirmed_rate: z.number().optional(),
+  /** Findings below the recorded severities. */
+  filtered_out: z.number(),
+  /** Configured paths that do not exist — a misconfiguration, not an empty store. */
+  missing_paths: z.array(z.string()),
+  lessons_written: z.number(),
+  lessons: z.array(z.string()),
+  memory_file: z.string().optional(),
+  config_sources: z.array(z.string()),
+  config_problems: z.array(z.string()),
+  /**
+   * Why a capture yielded no reviews -- an unfinished review, an interrupted
+   * stream, a file that is not a capture. Distinct from config_problems, and
+   * the difference between "no findings" and "no result" lives here.
+   */
+  source_problems: z.array(z.string()),
+  /** Why each unusable review was skipped, so a null result is explainable. */
+  skipped: z.array(z.object({ review: z.string(), reason: z.string() })),
+};
+
+server.registerTool(
+  "argus_ingest",
+  {
+    title: "Argus ingest (learn from CodeRabbit)",
+    description:
+      "Compare a past Argus review against CodeRabbit's review of the same commit, and record " +
+      "what Argus missed as lessons for future reviews. Findings partition three ways: both " +
+      "found it, only CodeRabbit found it (the supervised signal), and only Argus found it " +
+      "(unconfirmed — either a false positive or a catch CodeRabbit does not do). Only the " +
+      "misses are written to memory; reinforcing a reviewer's own unconfirmed findings is how " +
+      "it talks itself into its false positives. Reviews are joined on commit SHA, and a " +
+      "review with no matching Argus run is skipped rather than counted as all-misses. Note " +
+      "that confirmed_rate is a floor on precision, not precision.",
+    inputSchema: INGEST_INPUT,
+    // Not read-only: it writes lessons to the memory store unless dry_run.
+    annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
+    outputSchema: INGEST_OUTPUT,
+  },
+  async (args) => {
+    const repo_root = args.repo_root;
+    const project = args.project || path.basename(path.resolve(repo_root));
+
+    let result;
+    try {
+      result = run_ingest({
+        repo_root,
+        project,
+        from: args.from,
+        severities: args.severities,
+        commit: args.commit,
+        dry_run: args.dry_run,
+        reingest: args.reingest,
+      });
+    } catch (e) {
+      // run_ingest is written not to throw; if it ever does, report it as a
+      // tool error rather than taking the server down.
+      return {
+        isError: true,
+        content: [{ type: "text" as const, text: `Ingestion failed: ${msg(e)}` }],
+      };
+    }
+
+    const compared = result.reviews.filter((r) => r.score);
+    const total = (pick: (s: NonNullable<(typeof compared)[number]["score"]>) => number) =>
+      compared.reduce((a, r) => a + pick(r.score!), 0);
+    const agreed = total((s) => s.agreed);
+    const missed = total((s) => s.missed);
+    const argus_only = total((s) => s.argus_only);
+
+    const structured = {
+      paths: result.paths,
+      discovered: result.discovered,
+      severities: result.config.ingest?.coderabbit?.severities ?? [],
+      reviews_found: result.reviews.length,
+      reviews_compared: compared.length,
+      reviews_skipped: result.reviews.length - compared.length,
+      agreed,
+      missed,
+      argus_only,
+      // Undefined rather than a fabricated 1.0 when nothing was compared.
+      recall: compared.length ? agreed / (agreed + missed || 1) : undefined,
+      confirmed_rate: compared.length ? agreed / (agreed + argus_only || 1) : undefined,
+      filtered_out: result.filtered_out,
+      missing_paths: result.missing_paths,
+      lessons_written: result.written,
+      lessons: result.reviews.flatMap((r) => r.lessons.map((l) => l.text)),
+      memory_file: result.memory_file,
+      config_sources: result.config_sources,
+      config_problems: result.config_problems,
+      source_problems: result.source_problems,
+      skipped: result.reviews
+        .filter((r) => r.skipped_reason)
+        .map((r) => ({ review: r.review.id ?? "?", reason: r.skipped_reason! })),
+    };
+
+    // No store, or a configured path that is not there, is a configuration
+    // problem rather than a null result — reported as an error so the caller
+    // fixes it instead of reading "0 misses" as "Argus missed nothing". A store
+    // that exists and is simply empty is *not* an error: CodeRabbit may not
+    // have reviewed yet.
+    const unusable =
+      !result.paths.length || result.missing_paths.length === result.paths.length;
+    if (unusable) {
+      return {
+        isError: true,
+        content: [{ type: "text" as const, text: format_ingest_report(result) }],
+        structuredContent: structured,
+      };
+    }
+
+    return {
+      content: [{ type: "text" as const, text: format_ingest_report(result) }],
+      structuredContent: structured,
+    };
+  },
+);
+
 function msg(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
 }
 
 const transport = new StdioServerTransport();
 await server.connect(transport);
-console.error("argus mcp server ready (stdio)");
+console.error("argus mcp server ready (stdio): argus_review, argus_ingest");

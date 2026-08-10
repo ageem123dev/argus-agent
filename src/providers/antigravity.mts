@@ -360,14 +360,33 @@ export class AntigravityReasoning extends ArgusReasoning {
 
     const s = env.structured_output as StructuredReview | undefined;
     if (!s || typeof s.final_answer !== "string") {
-      // Schema enforcement failed; the prose response is still a usable review.
+      // Schema enforcement failed; the prose response is still a usable review —
+      // unless there isn't one. agy can report SUCCESS having produced neither,
+      // and returning that as a review is worse than failing: an empty verdict
+      // is indistinguishable from a clean diff, gets recorded as a real run, and
+      // then scores as a total miss against any second reviewer.
+      if (!env.response?.trim()) {
+        throw new AgyError(
+          `agy reported SUCCESS but returned neither structured output nor prose ` +
+            `(model ${this.routing[tier]}, conversation ${env.conversation_id}). ` +
+            `Inspect with: agy --conversation ${env.conversation_id} -p "what did you return?"`,
+        );
+      }
       return new ReviewResult(env.response, [], 0.6, tier, tier);
+    }
+
+    const verdict = render_verdict(s);
+    if (!verdict.trim()) {
+      throw new AgyError(
+        `agy returned structured output with an empty final_answer and no findings ` +
+          `(conversation ${env.conversation_id}).`,
+      );
     }
 
     const steps = Array.isArray(s.steps) ? s.steps : [];
     const reported = typeof s.complexity === "string" ? s.complexity.toLowerCase() : "";
     return new ReviewResult(
-      render_verdict(s),
+      verdict,
       steps,
       typeof s.confidence === "number" ? s.confidence : 0.8,
       // The model's own assessment, which may disagree with what we routed on.
