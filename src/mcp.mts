@@ -40,6 +40,7 @@ import {
   resolve_commit,
 } from "./run_record.mjs";
 import { format_ingest_report, run_ingest } from "./ingest_run.mjs";
+import { collect_diff, describe_diff } from "./diff.mjs";
 
 const PROVIDERS = ["antigravity", "antigravity-shim", "anthropic", "offline"] as const;
 
@@ -72,8 +73,18 @@ const INPUT = {
     .string()
     .optional()
     .describe(
-      'Git revision or range to diff, e.g. "HEAD", "main...HEAD", or "--staged". ' +
-        'Defaults to "HEAD" when no diff, diff_file, or git_range is given.',
+      'Git revision or range to diff, e.g. "HEAD" or "main...HEAD". Raw git output, so it ' +
+        "does NOT include untracked files. Prefer leaving this unset: the default collects " +
+        "the branch's own work, the working tree, and untracked files together.",
+    ),
+  base: z
+    .string()
+    .optional()
+    .describe(
+      "Branch the change is measured from when no diff, diff_file, or git_range is given. " +
+        "Defaults to main, then master, then the working tree alone. The review then covers " +
+        "committed branch work and uncommitted work in one diff, matching what a reviewer " +
+        "running against the base branch sees. Pass an empty string for uncommitted work only.",
     ),
   repo_root: z
     .string()
@@ -158,8 +169,18 @@ server.registerTool(
         diff = args.diff;
       } else if (args.diff_file) {
         diff = fs.readFileSync(args.diff_file, "utf-8");
+      } else if (args.git_range) {
+        diff = await git_diff(repo_root, args.git_range);
       } else {
-        diff = await git_diff(repo_root, args.git_range ?? "HEAD");
+        // Not `git diff HEAD`: that omits untracked files, so every file the
+        // change *adds* was invisible while the edits around it were not -- and
+        // it goes empty the moment the branch is committed, which is exactly
+        // when a second reviewer is run against it.
+        const collected = collect_diff(repo_root, {
+          base: args.base === "" ? null : args.base,
+        });
+        diff = collected.diff;
+        console.error(`argus: ${describe_diff(collected)}`);
       }
     } catch (e) {
       return {
@@ -174,7 +195,10 @@ server.registerTool(
         content: [
           {
             type: "text" as const,
-            text: "The diff is empty — nothing to review. Check git_range, or pass diff/diff_file.",
+            text:
+              "The diff is empty — nothing to review: no commits on this branch beyond its " +
+              "base, nothing uncommitted, and no untracked files. Check base/git_range, or " +
+              "pass diff/diff_file.",
           },
         ],
       };

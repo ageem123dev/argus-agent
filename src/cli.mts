@@ -37,6 +37,7 @@ import {
 } from "./run_record.mjs";
 import { init } from "./init.mjs";
 import { parse_severities } from "./config.mjs";
+import { collect_diff, describe_diff } from "./diff.mjs";
 import { format_ingest_report, run_ingest } from "./ingest_run.mjs";
 
 const PROVIDERS = ["auto", "antigravity", "antigravity-shim", "anthropic", "offline"] as const;
@@ -62,6 +63,9 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
       commit: { type: "string" },
       "dry-run": { type: "boolean", default: false },
       reingest: { type: "boolean", default: false },
+      base: { type: "string" },
+      "no-untracked": { type: "boolean", default: false },
+      out: { type: "string" },
       force: { type: "boolean", default: false },
     },
   });
@@ -78,6 +82,38 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
     }
     for (const n of r.notes) {
       console.log(`  note: ${n}`);
+    }
+    return 0;
+  }
+
+  // `argus diff` — gather what a review should be shown: the branch's own
+  // work plus anything uncommitted, including files git does not track yet.
+  // In Node rather than the slash command's shell, because the untracked
+  // pass is a loop that does not survive a Windows shell, and because the
+  // MCP tool needs exactly the same thing.
+  if (positionals[0] === "diff") {
+    const repo_root = values.repo as string;
+    const collected = collect_diff(repo_root, {
+      base: (values.base as string | undefined) ?? undefined,
+      include_untracked: !values["no-untracked"],
+    });
+    const out = values.out as string | undefined;
+    if (out) {
+      fs.mkdirSync(path.dirname(path.resolve(out)), { recursive: true });
+      fs.writeFileSync(out, collected.diff, "utf-8");
+      console.error(`argus diff: ${describe_diff(collected)}`);
+    } else {
+      process.stdout.write(collected.diff);
+    }
+    // An empty diff is a fact, not a failure: on a freshly committed branch
+    // with a clean tree there is genuinely nothing to review. Saying so beats
+    // handing the reviewer an empty file and letting it look broken.
+    if (!collected.diff.trim()) {
+      console.error(
+        "argus diff: nothing to review — no commits on this branch beyond its base, " +
+          "no uncommitted changes, and no untracked files.",
+      );
+      return 3;
     }
     return 0;
   }
