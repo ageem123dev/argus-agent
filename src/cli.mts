@@ -26,7 +26,7 @@ import {
   AntigravityReasoning,
   AntigravityClient,
   AutoAntigravityReasoning,
-  agy_available,
+  resolve_route,
   type AgyCallTrace,
   type AgyOptions,
 } from "./providers/antigravity.mjs";
@@ -176,22 +176,18 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
     on_call: (t) => agy_calls.push(t),
   };
 
-  // What was asked for: auto resolves here, and can degrade again at runtime.
+  // One shared resolver, so this and the MCP path cannot disagree about what
+  // `auto` means or about which provider a record names.
   const requested = provider;
-  if (provider === "auto") {
-    if (await agy_available()) {
-      provider = "antigravity";
-    } else if (process.env.ANTHROPIC_API_KEY) {
-      provider = "anthropic";
-    } else {
-      console.error("note: no agy binary and no ANTHROPIC_API_KEY — using offline reasoning.");
-      provider = "offline";
-    }
+  const decided = await resolve_route(provider);
+  provider = decided.route;
+  if (requested === "auto" && provider === "offline") {
+    console.error("note: no agy binary and no ANTHROPIC_API_KEY — using offline reasoning.");
   }
 
   const reasoning =
     provider === "antigravity"
-      ? requested === "auto"
+      ? decided.auto
         // auto keeps the single-call path but degrades to the shim rather
         // than losing the review; explicit antigravity stays one call.
         ? new AutoAntigravityReasoning(agy_opts)

@@ -31,7 +31,7 @@ import {
   AntigravityReasoning,
   AntigravityClient,
   AutoAntigravityReasoning,
-  agy_available,
+  resolve_route,
   type AgyCallTrace,
   type AgyOptions,
 } from "./providers/antigravity.mjs";
@@ -212,33 +212,23 @@ server.registerTool(
     const agy_calls: AgyCallTrace[] = [];
     const agy_opts: AgyOptions = { cwd: repo_root, on_call: (t) => agy_calls.push(t) };
 
-    // `auto` resolves by availability first, exactly as the CLI does. Without
-    // this it selected the agy path unconditionally, and since that path
-    // rethrows an `unavailable` failure by design, a host without the binary
-    // failed every review -- and `auto` is the default.
-    let route: (typeof PROVIDERS)[number] = args.provider;
-    if (route === "auto") {
-      if (await agy_available()) {
-        route = "auto";
-      } else if (process.env.ANTHROPIC_API_KEY) {
-        route = "anthropic";
-        console.error("argus: no agy binary — falling back to the Anthropic provider.");
-      } else {
-        route = "offline";
-        console.error("argus: no agy binary and no ANTHROPIC_API_KEY — using offline reasoning.");
-      }
+    // One shared resolver, so the CLI and this path cannot disagree about what
+    // `auto` means or about which provider a record names.
+    const { route, auto } = await resolve_route(args.provider);
+    if (args.provider === "auto" && route !== "antigravity") {
+      console.error(`argus: no agy binary — using the ${route} provider.`);
     }
 
     const reasoning =
-      route === "auto"
-        ? new AutoAntigravityReasoning(agy_opts)
-        : route === "antigravity"
-          ? new AntigravityReasoning(agy_opts)
-          : route === "antigravity-shim"
-            ? new ArgusReasoning(new AntigravityClient(agy_opts))
-            : route === "anthropic"
-              ? new ArgusReasoning()
-              : new OfflineReasoning();
+      route === "antigravity"
+        ? auto
+          ? new AutoAntigravityReasoning(agy_opts)
+          : new AntigravityReasoning(agy_opts)
+        : route === "antigravity-shim"
+          ? new ArgusReasoning(new AntigravityClient(agy_opts))
+          : route === "anthropic"
+            ? new ArgusReasoning()
+            : new OfflineReasoning();
 
     // Memory is on by default; Argus opens the repo's store itself.
     const argus = new Argus({ reasoning });

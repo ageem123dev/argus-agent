@@ -682,3 +682,44 @@ export class AutoAntigravityReasoning extends ArgusReasoning {
     }
   }
 }
+
+/** Every provider a caller may ask for. */
+export type ProviderRoute =
+  | "auto"
+  | "antigravity"
+  | "antigravity-shim"
+  | "anthropic"
+  | "offline";
+
+export interface RouteDecision {
+  /** What will actually run. Never "auto" — that is a request, not a provider. */
+  route: Exclude<ProviderRoute, "auto">;
+  /** True when the caller asked for auto, which selects the degrading path. */
+  auto: boolean;
+}
+
+/**
+ * Resolve what a request for a provider actually means.
+ *
+ * Shared by both entry points rather than written twice, because the two hand
+ * -written copies had already drifted: the CLI resolved `auto` to `antigravity`
+ * while the MCP path left it as the literal string `"auto"`, so a successful
+ * automatic review recorded a provider that names nothing — and the two records
+ * disagreed for the same run. `provider` is meant to say what answered.
+ *
+ * `auto` stays a separate flag rather than a route, since it decides which
+ * class to construct, not which provider ran.
+ */
+export async function resolve_route(
+  requested: ProviderRoute,
+  probe: { available?: () => Promise<boolean>; anthropic_key?: boolean } = {},
+): Promise<RouteDecision> {
+  if (requested !== "auto") {
+    return { route: requested, auto: false };
+  }
+  if (await (probe.available ?? agy_available)()) {
+    return { route: "antigravity", auto: true };
+  }
+  const key = probe.anthropic_key ?? Boolean(process.env.ANTHROPIC_API_KEY);
+  return { route: key ? "anthropic" : "offline", auto: true };
+}

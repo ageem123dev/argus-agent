@@ -19,6 +19,7 @@ import {
   type AgyEnvelope,
   AntigravityClient,
   AGY_ROUTING,
+  resolve_route,
 } from "../src/providers/antigravity.mjs";
 import { ArgusReasoning, ReviewResult, ROUTING_TABLE, Complexity } from "../src/reasoning.mjs";
 
@@ -302,5 +303,35 @@ describe("the fallback notice reports what actually happened", () => {
     const { fallback } = await auto.review(BIG_DIFF);
     assert.equal(fallback?.attempted, "custom-primary");
     assert.equal(fallback?.used, "custom-fallback");
+  });
+});
+
+describe("resolving what `auto` means", () => {
+  it("names the provider that will answer, never the request itself", async () => {
+    // The MCP path left `route` as the literal "auto", so a successful
+    // automatic review recorded a provider that names nothing — and disagreed
+    // with the CLI record for the same run. `provider` is meant to say what
+    // answered.
+    const d = await resolve_route("auto", { available: async () => true });
+    assert.equal(d.route, "antigravity", "a record must name a provider, not a request");
+    assert.equal(d.auto, true, "but the degrading path is still what gets constructed");
+  });
+
+  it("degrades by availability before any call is made", async () => {
+    assert.deepEqual(
+      await resolve_route("auto", { available: async () => false, anthropic_key: true }),
+      { route: "anthropic", auto: true },
+    );
+    assert.deepEqual(
+      await resolve_route("auto", { available: async () => false, anthropic_key: false }),
+      { route: "offline", auto: true },
+    );
+  });
+
+  it("leaves an explicit provider alone, and never marks it auto", async () => {
+    for (const p of ["antigravity", "antigravity-shim", "anthropic", "offline"] as const) {
+      const d = await resolve_route(p, { available: async () => true });
+      assert.deepEqual(d, { route: p, auto: false });
+    }
   });
 });
