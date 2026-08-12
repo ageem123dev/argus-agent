@@ -1,0 +1,209 @@
+/**
+ * Tests for degrading instead of losing the review.
+ *
+ * The single-call path fails hard on large diffs — six consecutive reviews of a
+ * 24-file change produced either an empty SUCCESS or a non-zero exit, while the
+ * shim answered the identical diff immediately. These pin what happens next.
+ *
+ * agy is injected rather than executed: the behaviours worth pinning are what
+ * Argus does with an envelope, and a real CLI cannot be made to return an empty
+ * SUCCESS on demand.
+ */
+import assert from "node:assert/strict";
+import { describe, it } from "node:test";
+
+import {
+  AgyError,
+  AntigravityReasoning,
+  AutoAntigravityReasoning,
+  type AgyEnvelope,
+} from "../src/providers/antigravity.mjs";
+import { ArgusReasoning, ReviewResult } from "../src/reasoning.mjs";
+
+const BIG_DIFF = "diff --git a/x b/x\n" + "+line\n".repeat(400);
+
+const envelope = (over: Partial<AgyEnvelope> = {}): AgyEnvelope => ({
+  conversation_id: "conv-1",
+  status: "SUCCESS",
+  response: "",
+  duration_seconds: 1,
+  num_turns: 1,
+  usage: {
+    input_tokens: 0,
+    output_tokens: 0,
+    thinking_tokens: 0,
+    cache_read_tokens: 0,
+    total_tokens: 0,
+  },
+  ...over,
+});
+
+/** An agy that returns SUCCESS carrying nothing — the observed failure. */
+function empty_agy() {
+  const calls: string[] = [];
+  return {
+    calls,
+    run: async (_p: string, model: string) => {
+      calls.push(model);
+      return envelope();
+    },
+  };
+}
+
+/** A stand-in for the shim, which is known to answer these diffs. */
+function working_fallback(verdict = "## Findings\n- **[high]** src/a.ts:1 — real.") {
+  const calls: string[] = [];
+  const reasoning = new ArgusReasoning(null);
+  reasoning.review = async () => {
+    calls.push("shim");
+    return new ReviewResult(verdict, [], 0.8, "complex", "complex");
+  };
+  return { calls, reasoning };
+}
+
+describe("empty responses are retried, not lost", () => {
+  it("retries once when agy returns nothing, then reports it", async () => {
+    const agy = empty_agy();
+    const reasoning = new AntigravityReasoning({}, undefined, {
+      empty_retries: 1,
+      run: agy.run as never,
+    });
+
+    await assert.rejects(
+      () => reasoning.review(BIG_DIFF),
+      (e: unknown) => e instanceof AgyError && e.kind === "empty",
+    );
+    assert.equal(agy.calls.length, 2, "one call plus one retry");
+  });
+
+  it("succeeds on the retry when the second call answers", async () => {
+    let n = 0;
+    const reasoning = new AntigravityReasoning({}, undefined, {
+      empty_retries: 1,
+      run: (async () => {
+        n += 1;
+        return n === 1 ? envelope() : envelope({ response: "a real prose review" });
+      }) as never,
+    });
+
+    const result = await reasoning.review(BIG_DIFF);
+    assert.equal(result.verdict, "a real prose review");
+    assert.equal(n, 2);
+  });
+
+  it("explicit antigravity makes exactly one call and does not retry", async () => {
+    // `provider: "antigravity"` is documented as one agy call per review; the
+    // retry belongs to auto, not to it.
+    const agy = empty_agy();
+    const reasoning = new AntigravityReasoning({}, undefined, { run: agy.run as never });
+
+    await assert.rejects(() => reasoning.review(BIG_DIFF), AgyError);
+    assert.equal(agy.calls.length, 1, "no retry without opting in");
+  });
+
+  it("does not retry a request that was rejected", async () => {
+    // A rejected request is rejected identically the second time; only an
+    // ignored one is worth resending.
+    const calls: string[] = [];
+    const reasoning = new AntigravityReasoning({}, undefined, {
+      empty_retries: 1,
+      run: (async () => {
+        calls.push("x");
+        throw new AgyError("agy failed: Command failed: agy.exe -p ...", "failed");
+      }) as never,
+    });
+
+    await assert.rejects(() => reasoning.review(BIG_DIFF), AgyError);
+    assert.equal(calls.length, 1, "an argument error must fail fast");
+  });
+});
+
+describe("auto degrades instead of throwing the review away", () => {
+  it("falls back to the shim when the single call stays empty", async () => {
+    const agy = empty_agy();
+    const shim = working_fallback();
+    const auto = new AutoAntigravityReasoning(
+      {},
+      new AntigravityReasoning({}, undefined, { empty_retries: 1, run: agy.run as never }),
+      shim.reasoning,
+    );
+
+    const result = await auto.review(BIG_DIFF);
+    assert.match(result.verdict, /real/, "a real review, not a synthesised one");
+    assert.equal(agy.calls.length, 2, "primary tried twice first");
+    assert.equal(shim.calls.length, 1);
+  });
+
+  it("names the path that actually answered", async () => {
+    const shim = working_fallback();
+    const auto = new AutoAntigravityReasoning(
+      {},
+      new AntigravityReasoning({}, undefined, { empty_retries: 1, run: empty_agy().run as never }),
+      shim.reasoning,
+    );
+
+    const { fallback } = await auto.review(BIG_DIFF);
+    assert.ok(fallback, "a fallback review must be identifiable as one");
+    assert.equal(fallback.attempted, "antigravity");
+    assert.equal(fallback.used, "antigravity-shim");
+    assert.equal(fallback.attempts, 2);
+    assert.match(fallback.reason, /neither structured output nor prose/);
+  });
+
+  it("falls back on a non-zero exit too, without retrying it", async () => {
+    const calls: string[] = [];
+    const shim = working_fallback();
+    const auto = new AutoAntigravityReasoning(
+      {},
+      new AntigravityReasoning({}, undefined, {
+        empty_retries: 1,
+        run: (async () => {
+          calls.push("x");
+          throw new AgyError("agy failed: Command failed", "failed");
+        }) as never,
+      }),
+      shim.reasoning,
+    );
+
+    const result = await auto.review(BIG_DIFF);
+    assert.equal(calls.length, 1, "rejected requests are not resent");
+    assert.equal(result.fallback?.attempts, 1);
+    assert.equal(shim.calls.length, 1);
+  });
+
+  it("does not fall back when the binary is missing", async () => {
+    // Every path runs the same binary, so a fallback would only fail twice.
+    const shim = working_fallback();
+    const auto = new AutoAntigravityReasoning(
+      {},
+      new AntigravityReasoning({}, undefined, {
+        run: (async () => {
+          throw new AgyError("agy not found at ...", "unavailable");
+        }) as never,
+      }),
+      shim.reasoning,
+    );
+
+    await assert.rejects(
+      () => auto.review(BIG_DIFF),
+      (e: unknown) => e instanceof AgyError && e.kind === "unavailable",
+    );
+    assert.equal(shim.calls.length, 0, "must not spend a fallback on a missing binary");
+  });
+
+  it("propagates rather than synthesising when the fallback also fails", async () => {
+    // The empty-verdict guard's reasoning: a manufactured "no findings" is
+    // indistinguishable from a clean diff and would be recorded as a real run.
+    const failing = new ArgusReasoning(null);
+    failing.review = async () => {
+      throw new AgyError("shim failed too", "failed");
+    };
+    const auto = new AutoAntigravityReasoning(
+      {},
+      new AntigravityReasoning({}, undefined, { run: empty_agy().run as never }),
+      failing,
+    );
+
+    await assert.rejects(() => auto.review(BIG_DIFF), /shim failed too/);
+  });
+});

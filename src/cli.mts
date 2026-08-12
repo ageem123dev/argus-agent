@@ -25,6 +25,7 @@ import { ArgusReasoning, OfflineReasoning } from "./reasoning.mjs";
 import {
   AntigravityReasoning,
   AntigravityClient,
+  AutoAntigravityReasoning,
   agy_available,
   type AgyCallTrace,
   type AgyOptions,
@@ -175,6 +176,8 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
     on_call: (t) => agy_calls.push(t),
   };
 
+  // What was asked for: auto resolves here, and can degrade again at runtime.
+  const requested = provider;
   if (provider === "auto") {
     if (await agy_available()) {
       provider = "antigravity";
@@ -188,7 +191,11 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
 
   const reasoning =
     provider === "antigravity"
-      ? new AntigravityReasoning(agy_opts)
+      ? requested === "auto"
+        // auto keeps the single-call path but degrades to the shim rather
+        // than losing the review; explicit antigravity stays one call.
+        ? new AutoAntigravityReasoning(agy_opts)
+        : new AntigravityReasoning(agy_opts)
       : provider === "antigravity-shim"
         ? new ArgusReasoning(new AntigravityClient(agy_opts))
         : provider === "anthropic"
@@ -292,7 +299,10 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
       // historical diff records whatever HEAD happens to be, which then joins
       // to the wrong review during ingestion — or to none at all.
       commit: (values.commit as string | undefined) ?? resolve_commit(repo_root),
-      provider,
+      // The path that answered, not the one requested: a fallback review
+      // attributed to the primary would misreport provenance.
+      provider: review.fallback?.used ?? provider,
+      provider_requested: requested,
       invoked_via: "cli",
       calls: agy_calls,
       audit_entries: argus.governance.audit.entries as unknown as Array<Record<string, unknown>>,

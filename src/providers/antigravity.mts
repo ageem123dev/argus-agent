@@ -117,7 +117,35 @@ export interface AgyOptions {
   on_call?: (trace: AgyCallTrace) => void;
 }
 
-export class AgyError extends Error {}
+/**
+ * Why an agy call failed. The distinction decides what helps next, so it is
+ * carried rather than reconstructed from message text.
+ */
+export type AgyFailure =
+  /**
+   * The binary could not be found or started. Falling back is pointless — every
+   * path runs the same binary — so this is the one kind that fails fast.
+   */
+  | "unavailable"
+  /**
+   * It ran, reported SUCCESS, and produced neither structured output nor prose.
+   * Nothing about the request was rejected, so the same request may well work;
+   * this is the one kind worth retrying.
+   */
+  | "empty"
+  /**
+   * It ran and failed: non-zero exit, timeout, unparseable stdout, or a status
+   * other than SUCCESS. Retrying an identical request that was just rejected
+   * only spends the time twice, but a differently-shaped request may succeed,
+   * so this falls back without retrying.
+   */
+  | "failed";
+
+export class AgyError extends Error {
+  constructor(message: string, readonly kind: AgyFailure = "failed") {
+    super(message);
+  }
+}
 
 /**
  * agy takes the prompt only as an argv value — no stdin, no prompt-file flag —
@@ -195,10 +223,19 @@ async function spawn_agy(
       },
       (err, out, stderr) => {
         if (err) {
-          const hint = (err as NodeJS.ErrnoException).code === "ENOENT"
+        if (err) {
+          const missing = (err as NodeJS.ErrnoException).code === "ENOENT";
+          const hint = missing
             ? `agy not found at "${bin}" — set ARGUS_AGY_BIN`
             : `agy failed: ${err.message}`;
-          reject(new AgyError(`${hint}${stderr ? `\n${stderr.slice(0, 500)}` : ""}`));
+          reject(
+            new AgyError(
+              `${hint}${stderr ? `\n${stderr.slice(0, 500)}` : ""}`,
+              missing ? "unavailable" : "failed",
+            ),
+          );
+          return;
+        }
           return;
         }
         resolve(out);
@@ -336,10 +373,26 @@ const TIERS = new Set<string>(Object.values(Complexity));
  *
  * Drop-in for ArgusReasoning: `new Argus({ reasoning: new AntigravityReasoning() })`.
  */
+/** How AntigravityReasoning behaves when a call comes back with nothing. */
+export interface AntigravityBehaviour {
+  /**
+   * Extra attempts when agy reports SUCCESS and returns nothing.
+   *
+   * Zero by default, so `provider: "antigravity"` remains exactly one call per
+   * review as documented. The auto path raises it: an empty response rejected
+   * nothing about the request, so the same request is worth sending twice
+   * before concluding the model cannot answer it.
+   */
+  empty_retries?: number;
+  /** Injection seam for tests. Defaults to the real run_agy. */
+  run?: typeof run_agy;
+}
+
 export class AntigravityReasoning extends ArgusReasoning {
   constructor(
     private opts: AgyOptions = {},
     private routing: Record<Complexity, string> = AGY_ROUTING,
+    private behaviour: AntigravityBehaviour = {},
   ) {
     super(null); // never consults the Anthropic client
   }
@@ -351,13 +404,34 @@ export class AntigravityReasoning extends ArgusReasoning {
     const tier =
       lines < 30 ? Complexity.SIMPLE : lines < 100 ? Complexity.MODERATE : Complexity.COMPLEX;
 
-    const env = await run_agy(
-      REVIEW_PROMPT + diff,
-      this.routing[tier],
-      this.opts,
-      ["--json-schema", JSON.stringify(REVIEW_SCHEMA)],
-    );
+    const run = this.behaviour.run ?? run_agy;
+    const attempts = Math.max(0, this.behaviour.empty_retries ?? 0) + 1;
 
+    let last: AgyError | undefined;
+    for (let attempt = 1; attempt <= attempts; attempt++) {
+      try {
+        return this.interpret(
+          await run(REVIEW_PROMPT + diff, this.routing[tier], this.opts, [
+            "--json-schema",
+            JSON.stringify(REVIEW_SCHEMA),
+          ]),
+          tier,
+        );
+      } catch (e) {
+        // Only an empty response earns another attempt. A rejected request
+        // will be rejected identically, and a missing binary stays missing.
+        if (!(e instanceof AgyError) || e.kind !== "empty" || attempt === attempts) {
+          throw e;
+        }
+        last = e;
+      }
+    }
+    /* c8 ignore next */
+    throw last ?? new AgyError("agy produced no review", "empty");
+  }
+
+  /** Turn an envelope into a review, or say precisely why it is not one. */
+  private interpret(env: AgyEnvelope, tier: Complexity): ReviewResult {
     const s = env.structured_output as StructuredReview | undefined;
     if (!s || typeof s.final_answer !== "string") {
       // Schema enforcement failed; the prose response is still a usable review —
@@ -370,6 +444,7 @@ export class AntigravityReasoning extends ArgusReasoning {
           `agy reported SUCCESS but returned neither structured output nor prose ` +
             `(model ${this.routing[tier]}, conversation ${env.conversation_id}). ` +
             `Inspect with: agy --conversation ${env.conversation_id} -p "what did you return?"`,
+          "empty",
         );
       }
       return new ReviewResult(env.response, [], 0.6, tier, tier);
@@ -380,6 +455,7 @@ export class AntigravityReasoning extends ArgusReasoning {
       throw new AgyError(
         `agy returned structured output with an empty final_answer and no findings ` +
           `(conversation ${env.conversation_id}).`,
+        "empty",
       );
     }
 
@@ -444,4 +520,78 @@ export async function agy_available(bin?: string): Promise<boolean> {
     const child = execFile(target, ["--version"], { timeout: 15_000 }, (err) => resolve(!err));
     child.stdin?.end();
   });
+}
+
+// ---------------------------------------------------------------------------
+// auto — one call, then degrade
+// ---------------------------------------------------------------------------
+
+/** What happened when the primary path could not produce a review. */
+export interface FallbackNotice {
+  /** The path that was tried first. */
+  attempted: string;
+  /** The path that actually produced the verdict. */
+  used: string;
+  /** Why the first path was abandoned. */
+  reason: string;
+  /** Calls spent on the primary before giving up, including retries. */
+  attempts: number;
+}
+
+/**
+ * The resilient path: one schema-enforced call, retried once if it comes back
+ * empty, then the shim.
+ *
+ * The single-call path fails hard on large diffs — six consecutive reviews of a
+ * 24-file change produced either an empty SUCCESS or a non-zero exit, while the
+ * shim succeeded on the identical diff immediately. Losing the entire review in
+ * that case is the wrong trade: the shim costs roughly twenty calls instead of
+ * one, but twenty calls that answer beat one that does not.
+ *
+ * Three things this deliberately does not do.
+ *
+ * It does not synthesise anything. If the fallback also fails, the error
+ * propagates — an empty verdict is indistinguishable from a clean diff, and
+ * manufacturing "no findings" would be recorded as a real review and then score
+ * as a total miss against a second reviewer.
+ *
+ * It does not retry a request that was rejected, only one that was ignored, and
+ * it does not fall back at all when the binary is missing — the fallback runs
+ * the same binary.
+ *
+ * And it does not hide which path answered. The notice travels on the result so
+ * the run record can say what actually produced the verdict; a review labelled
+ * as the primary's when the shim wrote it would misreport provenance in exactly
+ * the records ingestion later scores.
+ */
+export class AutoAntigravityReasoning extends ArgusReasoning {
+  constructor(
+    private opts: AgyOptions = {},
+    private primary: ArgusReasoning = new AntigravityReasoning(opts, AGY_ROUTING, {
+      empty_retries: 1,
+    }),
+    private fallback: ArgusReasoning = new ArgusReasoning(new AntigravityClient(opts)),
+  ) {
+    super(null); // never consults the Anthropic client
+  }
+
+  override async review(diff: string): Promise<ReviewResult> {
+    try {
+      return await this.primary.review(diff);
+    } catch (e) {
+      if (!(e instanceof AgyError) || e.kind === "unavailable") {
+        // Nothing here can be improved by trying the same binary again.
+        throw e;
+      }
+      const result = await this.fallback.review(diff);
+      result.fallback = {
+        attempted: "antigravity",
+        used: "antigravity-shim",
+        reason: e.message,
+        // One call, plus the retry the empty case earns.
+        attempts: e.kind === "empty" ? 2 : 1,
+      };
+      return result;
+    }
+  }
 }
