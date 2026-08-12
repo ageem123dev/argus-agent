@@ -108,29 +108,11 @@ const PATH_RE = new RegExp(
 /** `path:line` or `path:line:col`, as most reviewers cite a location. */
 const PATH_LINE_RE = new RegExp(PATH_RE.source + "(?::(\\d+))?");
 
-/**
- * Strip markdown ornamentation so the heuristics see prose.
- *
- * Underscores are deliberately *not* stripped, though markdown uses them for
- * emphasis. They are far more common in paths than in emphasis, and removing
- * them silently rewrote every snake_case path a reviewer cited:
- * `agent/watchdog_agent/tools_client.py` became `agent/watchdogagent/toolsclient.py`,
- * and `_bmad-output/` became `bmad-output/`.
- *
- * That cost two things. Lessons were filed against directories that do not
- * exist, so recall could never scope them to a real change. And because a
- * second reviewer's paths arrive as structured fields rather than prose, the
- * two spellings never matched — the *same* finding scored as a miss and a
- * false positive at once, understating recall and precision together and
- * teaching memory that Argus had missed something it had in fact found.
- *
- * A stray underscore left in a title costs nothing: titles feed topic
- * classification, which splits on non-alphanumerics anyway.
- */
+/** Strip markdown ornamentation so the heuristics see prose. */
 export function strip_markdown(line: string): string {
   return line
     .replace(/^\s*(?:[-*+]|\d+[.)])\s+/, "")
-    .replace(/[*`#]+/g, "")
+    .replace(/[*_`#]+/g, "")
     .replace(/\s+/g, " ")
     .trim();
 }

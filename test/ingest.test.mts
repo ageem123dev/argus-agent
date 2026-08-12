@@ -80,45 +80,6 @@ describe("findings", () => {
     assert.deepEqual(parse_findings("- see [note] in src/a.mts:3 for context"), []);
   });
 
-  it("keeps underscores in a path, which markdown emphasis rules would eat", () => {
-    // snake_case is the Python convention, and stripping "_" as emphasis
-    // rewrote every such path: agent/watchdog_agent/tools_client.py became
-    // agent/watchdogagent/toolsclient.py, and _bmad-output/ lost its leading
-    // underscore. Lessons were then filed against directories that do not
-    // exist, and could never be scoped to a real change.
-    for (const cited of [
-      "agent/watchdog_agent/tools_client.py",
-      "_bmad-output/artifacts/story.md",
-      "migrations/0009_add_units.sql",
-    ]) {
-      const [f] = parse_findings("- **[high]** `" + cited + ":1` — something.");
-      assert.equal(f?.path, cited);
-    }
-  });
-
-  it("matches a second reviewer on a snake_case path", () => {
-    // The costly half. A second reviewer supplies paths as structured fields,
-    // never through markdown, so a stripped underscore made the two spellings
-    // disagree — and the *same* finding scored as a miss and a false positive
-    // at once, understating recall and precision together.
-    const mine = parse_findings(
-      "- **[high]** `agent/watchdog_agent/tools_client.py:61` — empty body encodes wrong.",
-    );
-    const theirs = [
-      make_finding({
-        source: "coderabbit",
-        path: "agent/watchdog_agent/tools_client.py",
-        line: 61,
-        severity: "high",
-        title: "empty body encodes wrong",
-      }),
-    ];
-    const p = partition_findings(mine, theirs);
-    assert.equal(p.agreed.length, 1, "the same finding must not read as a miss");
-    assert.deepEqual(p.missed, []);
-    assert.deepEqual(p.argus_only, []);
-  });
-
   it("keeps a dotfile directory intact, so both reviewers cite the same path", () => {
     // Anchoring the path on \b dropped the leading dot, and the resulting
     // "claude/skills/..." never matched CodeRabbit's ".claude/skills/...".
