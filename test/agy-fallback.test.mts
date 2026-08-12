@@ -269,3 +269,38 @@ describe("the fallback keeps the reasoning model", () => {
     );
   });
 });
+
+describe("the fallback notice reports what actually happened", () => {
+  it("counts the attempts the primary really spent, not the default budget", async () => {
+    // `attempts` was inferred from the failure kind, which is only right for the
+    // default retry budget. build_run_record writes it straight into the run
+    // record, so a guessed call count is wrong exactly where ingestion reads it.
+    const shim = working_fallback();
+    const auto = new AutoAntigravityReasoning(
+      {},
+      new AntigravityReasoning({}, undefined, {
+        empty_retries: 3, // not the default
+        run: empty_agy().run as never,
+      }),
+      shim.reasoning,
+    );
+
+    const { fallback } = await auto.review(BIG_DIFF);
+    assert.equal(fallback?.attempts, 4, "one call plus three retries");
+  });
+
+  it("labels the primary it was actually given", async () => {
+    const shim = working_fallback();
+    const auto = new AutoAntigravityReasoning(
+      {},
+      new AntigravityReasoning({}, undefined, { run: empty_agy().run as never }),
+      shim.reasoning,
+      "custom-primary",
+      "custom-fallback",
+    );
+
+    const { fallback } = await auto.review(BIG_DIFF);
+    assert.equal(fallback?.attempted, "custom-primary");
+    assert.equal(fallback?.used, "custom-fallback");
+  });
+});

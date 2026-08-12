@@ -239,6 +239,14 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
 
   const review = outcome.review!;
   const p_trace = outcome.perception_trace!;
+  // The route that answered, so stdout and the run record cannot disagree.
+  const answered = review.fallback?.used ?? provider;
+  if (review.fallback) {
+    console.error(
+      `note: ${review.fallback.attempted} did not answer after ${review.fallback.attempts} ` +
+        `attempt(s); ${review.fallback.used} produced this review.`,
+    );
+  }
   // A provider can return successfully and still yield nothing. Silence here
   // reads as "clean diff" when it means "the review did not happen".
   if (!review.verdict.trim()) {
@@ -251,7 +259,7 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
   // (what the model thought of the change) — they routinely disagree.
   const tier = review.routing_tier ? `, tier=${review.routing_tier}` : "";
   console.log(
-    `=== Reasoning (${provider}, ${review.complexity}${tier}, conf=${review.confidence.toFixed(2)}) ===`,
+    `=== Reasoning (${answered}, ${review.complexity}${tier}, conf=${review.confidence.toFixed(2)}) ===`,
   );
   // Printed in full, not truncated: this stdout is what a calling agent reads.
   console.log(review.verdict);
@@ -300,8 +308,7 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
       // to the wrong review during ingestion — or to none at all.
       commit: (values.commit as string | undefined) ?? resolve_commit(repo_root),
       // The path that answered, not the one requested: a fallback review
-      // attributed to the primary would misreport provenance.
-      provider: review.fallback?.used ?? provider,
+      provider: answered,
       provider_requested: requested,
       invoked_via: "cli",
       calls: agy_calls,

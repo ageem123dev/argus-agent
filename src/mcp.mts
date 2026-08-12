@@ -31,6 +31,7 @@ import {
   AntigravityReasoning,
   AntigravityClient,
   AutoAntigravityReasoning,
+  agy_available,
   type AgyCallTrace,
   type AgyOptions,
 } from "./providers/antigravity.mjs";
@@ -211,14 +212,31 @@ server.registerTool(
     const agy_calls: AgyCallTrace[] = [];
     const agy_opts: AgyOptions = { cwd: repo_root, on_call: (t) => agy_calls.push(t) };
 
+    // `auto` resolves by availability first, exactly as the CLI does. Without
+    // this it selected the agy path unconditionally, and since that path
+    // rethrows an `unavailable` failure by design, a host without the binary
+    // failed every review -- and `auto` is the default.
+    let route: (typeof PROVIDERS)[number] = args.provider;
+    if (route === "auto") {
+      if (await agy_available()) {
+        route = "auto";
+      } else if (process.env.ANTHROPIC_API_KEY) {
+        route = "anthropic";
+        console.error("argus: no agy binary — falling back to the Anthropic provider.");
+      } else {
+        route = "offline";
+        console.error("argus: no agy binary and no ANTHROPIC_API_KEY — using offline reasoning.");
+      }
+    }
+
     const reasoning =
-      args.provider === "auto"
+      route === "auto"
         ? new AutoAntigravityReasoning(agy_opts)
-        : args.provider === "antigravity"
+        : route === "antigravity"
           ? new AntigravityReasoning(agy_opts)
-          : args.provider === "antigravity-shim"
+          : route === "antigravity-shim"
             ? new ArgusReasoning(new AntigravityClient(agy_opts))
-            : args.provider === "anthropic"
+            : route === "anthropic"
               ? new ArgusReasoning()
               : new OfflineReasoning();
 
@@ -269,7 +287,7 @@ server.registerTool(
           project,
           repo_root,
           commit: resolve_commit(repo_root),
-          provider: review.fallback?.used ?? args.provider,
+          provider: review.fallback?.used ?? route,
           provider_requested: args.provider,
           invoked_via: "mcp",
           calls: agy_calls,

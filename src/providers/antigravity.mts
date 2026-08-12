@@ -37,7 +37,8 @@ import { ArgusReasoning, ReviewResult, Complexity } from "../reasoning.mjs";
 export function resolve_agy_bin(): string {
   const candidates = [
     process.env.ARGUS_AGY_BIN,
-    process.env.LOCALAPPDATA && path.join(process.env.LOCALAPPDATA, "agy", "bin", "agy.exe"),
+    process.env.LOCALAPPDATA &&
+      path.join(process.env.LOCALAPPDATA, "agy", "bin", "agy.exe"),
     process.env.HOME && path.join(process.env.HOME, ".local", "bin", "agy"),
   ].filter((c): c is string => Boolean(c));
 
@@ -77,7 +78,14 @@ export const CLAUDE_TO_AGY: Record<string, string> = {
 /** The `--output-format json` envelope agy writes to stdout. */
 export interface AgyEnvelope {
   conversation_id: string;
-  status: "SUCCESS" | "ERROR" | "CANCELED" | "INTERRUPTED" | "INVALID" | "WAITING" | "RUNNING";
+  status:
+    | "SUCCESS"
+    | "ERROR"
+    | "CANCELED"
+    | "INTERRUPTED"
+    | "INVALID"
+    | "WAITING"
+    | "RUNNING";
   response: string;
   duration_seconds: number;
   num_turns: number;
@@ -142,7 +150,18 @@ export type AgyFailure =
   | "failed";
 
 export class AgyError extends Error {
-  constructor(message: string, readonly kind: AgyFailure = "failed") {
+  /**
+   * Calls actually spent before giving up, when the thrower counted them.
+   * Inferring it from `kind` was only right for the default retry budget, and
+   * the number is persisted into run records — a fabricated call count is
+   * wrong exactly where later ingestion reads it.
+   */
+  attempts?: number;
+
+  constructor(
+    message: string,
+    readonly kind: AgyFailure = "failed",
+  ) {
     super(message);
   }
 }
@@ -188,10 +207,14 @@ export async function run_agy(
   }
 
   args.unshift(
-    "-p", effective_prompt,
-    "--output-format", "json",
-    "--model", model,
-    "--print-timeout", opts.print_timeout ?? "5m",
+    "-p",
+    effective_prompt,
+    "--output-format",
+    "json",
+    "--model",
+    model,
+    "--print-timeout",
+    opts.print_timeout ?? "5m",
     // Diff content must never be expanded as a slash command or skill.
     "--disable-slash-commands",
   );
@@ -223,7 +246,6 @@ async function spawn_agy(
       },
       (err, out, stderr) => {
         if (err) {
-        if (err) {
           const missing = (err as NodeJS.ErrnoException).code === "ENOENT";
           const hint = missing
             ? `agy not found at "${bin}" — set ARGUS_AGY_BIN`
@@ -236,8 +258,6 @@ async function spawn_agy(
           );
           return;
         }
-          return;
-        }
         resolve(out);
       },
     );
@@ -248,10 +268,14 @@ async function spawn_agy(
   try {
     env = JSON.parse(stdout) as AgyEnvelope;
   } catch {
-    throw new AgyError(`agy returned non-JSON stdout:\n${stdout.slice(0, 500)}`);
+    throw new AgyError(
+      `agy returned non-JSON stdout:\n${stdout.slice(0, 500)}`,
+    );
   }
   if (env.status !== "SUCCESS") {
-    throw new AgyError(`agy status=${env.status}: ${env.response?.slice(0, 300) ?? ""}`);
+    throw new AgyError(
+      `agy status=${env.status}: ${env.response?.slice(0, 300) ?? ""}`,
+    );
   }
   opts.on_call?.({
     model,
@@ -293,8 +317,14 @@ const REVIEW_SCHEMA = {
       items: {
         type: "object",
         properties: {
-          content: { type: "string", description: "What this step established." },
-          confidence: { type: "number", description: "Confidence in this step, 0.0 to 1.0." },
+          content: {
+            type: "string",
+            description: "What this step established.",
+          },
+          confidence: {
+            type: "number",
+            description: "Confidence in this step, 0.0 to 1.0.",
+          },
         },
         required: ["content", "confidence"],
       },
@@ -305,23 +335,33 @@ const REVIEW_SCHEMA = {
       items: {
         type: "object",
         properties: {
-          severity: { type: "string", enum: ["critical", "high", "medium", "low", "info"] },
+          severity: {
+            type: "string",
+            enum: ["critical", "high", "medium", "low", "info"],
+          },
           location: {
-        type: "string",
-        description:
-          "Repository-relative path exactly as it appears in a '### <path>' heading " +
-          "or diff header, optionally ':<line>' counted within that file's own section. " +
-          "Never a temp path, absolute path, or file:// URL.",
-      },
-          issue: { type: "string", description: "One sentence: what is wrong." },
-          suggestion: { type: "string", description: "One sentence: how to fix it." },
+            type: "string",
+            description:
+              "Repository-relative path exactly as it appears in a '### <path>' heading " +
+              "or diff header, optionally ':<line>' counted within that file's own section. " +
+              "Never a temp path, absolute path, or file:// URL.",
+          },
+          issue: {
+            type: "string",
+            description: "One sentence: what is wrong.",
+          },
+          suggestion: {
+            type: "string",
+            description: "One sentence: how to fix it.",
+          },
         },
         required: ["severity", "location", "issue"],
       },
     },
     final_answer: {
       type: "string",
-      description: "Prose summary of the review. No step-by-step narration here.",
+      description:
+        "Prose summary of the review. No step-by-step narration here.",
     },
   },
   required: ["complexity", "confidence", "steps", "findings", "final_answer"],
@@ -331,7 +371,12 @@ interface StructuredReview {
   complexity: string;
   confidence: number;
   steps: Array<{ content: string; confidence: number }>;
-  findings: Array<{ severity: string; location: string; issue: string; suggestion?: string }>;
+  findings: Array<{
+    severity: string;
+    location: string;
+    issue: string;
+    suggestion?: string;
+  }>;
   final_answer: string;
 }
 
@@ -402,7 +447,11 @@ export class AntigravityReasoning extends ArgusReasoning {
     // tier in its structured output. Saves a full call per review.
     const lines = (diff.match(/\n/g) ?? []).length;
     const tier =
-      lines < 30 ? Complexity.SIMPLE : lines < 100 ? Complexity.MODERATE : Complexity.COMPLEX;
+      lines < 30
+        ? Complexity.SIMPLE
+        : lines < 100
+          ? Complexity.MODERATE
+          : Complexity.COMPLEX;
 
     const run = this.behaviour.run ?? run_agy;
     const attempts = Math.max(0, this.behaviour.empty_retries ?? 0) + 1;
@@ -420,9 +469,17 @@ export class AntigravityReasoning extends ArgusReasoning {
       } catch (e) {
         // Only an empty response earns another attempt. A rejected request
         // will be rejected identically, and a missing binary stays missing.
-        if (!(e instanceof AgyError) || e.kind !== "empty" || attempt === attempts) {
+        if (
+          !(e instanceof AgyError) ||
+          e.kind !== "empty" ||
+          attempt === attempts
+        ) {
+          if (e instanceof AgyError) {
+            e.attempts = attempt;
+          }
           throw e;
         }
+        e.attempts = attempt;
         last = e;
       }
     }
@@ -460,7 +517,8 @@ export class AntigravityReasoning extends ArgusReasoning {
     }
 
     const steps = Array.isArray(s.steps) ? s.steps : [];
-    const reported = typeof s.complexity === "string" ? s.complexity.toLowerCase() : "";
+    const reported =
+      typeof s.complexity === "string" ? s.complexity.toLowerCase() : "";
     return new ReviewResult(
       verdict,
       steps,
@@ -522,7 +580,9 @@ export class AntigravityClient {
       // hardest changes on flash — so a review that fell back was degraded
       // twice: more calls *and* a weaker model, exactly where it needed the
       // stronger one.
-      const model = req.thinking ? this.deep_model : (this.models[req.model] ?? req.model);
+      const model = req.thinking
+        ? this.deep_model
+        : (this.models[req.model] ?? req.model);
       const env = await this.run(prompt, model, this.opts);
       return { content: [{ text: env.response }] };
     },
@@ -533,7 +593,9 @@ export class AntigravityClient {
 export async function agy_available(bin?: string): Promise<boolean> {
   const target = bin ?? resolve_agy_bin();
   return new Promise((resolve) => {
-    const child = execFile(target, ["--version"], { timeout: 15_000 }, (err) => resolve(!err));
+    const child = execFile(target, ["--version"], { timeout: 15_000 }, (err) =>
+      resolve(!err),
+    );
     child.stdin?.end();
   });
 }
@@ -583,10 +645,19 @@ export interface FallbackNotice {
 export class AutoAntigravityReasoning extends ArgusReasoning {
   constructor(
     private opts: AgyOptions = {},
-    private primary: ArgusReasoning = new AntigravityReasoning(opts, AGY_ROUTING, {
-      empty_retries: 1,
-    }),
-    private fallback: ArgusReasoning = new ArgusReasoning(new AntigravityClient(opts)),
+    private primary: ArgusReasoning = new AntigravityReasoning(
+      opts,
+      AGY_ROUTING,
+      {
+        empty_retries: 1,
+      },
+    ),
+    private fallback: ArgusReasoning = new ArgusReasoning(
+      new AntigravityClient(opts),
+    ),
+    /** Names written to the record. Configurable so an injected primary is not mislabelled. */
+    private primary_label: string = "antigravity",
+    private fallback_label: string = "antigravity-shim",
   ) {
     super(null); // never consults the Anthropic client
   }
@@ -601,11 +672,11 @@ export class AutoAntigravityReasoning extends ArgusReasoning {
       }
       const result = await this.fallback.review(diff);
       result.fallback = {
-        attempted: "antigravity",
-        used: "antigravity-shim",
+        attempted: this.primary_label,
+        used: this.fallback_label,
         reason: e.message,
-        // One call, plus the retry the empty case earns.
-        attempts: e.kind === "empty" ? 2 : 1,
+        // What the primary actually spent, not what the default budget would.
+        attempts: e.attempts ?? 1,
       };
       return result;
     }
