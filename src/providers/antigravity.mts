@@ -489,6 +489,14 @@ export class AntigravityClient {
   constructor(
     private opts: AgyOptions = {},
     private models: Record<string, string> = CLAUDE_TO_AGY,
+    /**
+     * The model a deep-reasoning turn gets, whatever slug it arrived under.
+     * Separate from `models` because the distinction is the reasoning budget,
+     * which the slug does not carry.
+     */
+    private deep_model: string = AGY_ROUTING[Complexity.COMPLEX],
+    /** Injection seam for tests. Defaults to the real run_agy. */
+    private run: typeof run_agy = run_agy,
   ) {}
 
   messages = {
@@ -507,7 +515,15 @@ export class AntigravityClient {
         .filter(Boolean)
         .join("\n\n");
 
-      const env = await run_agy(prompt, this.models[req.model] ?? req.model, this.opts);
+      // `thinking` is what distinguishes the complex tier: ROUTING_TABLE
+      // separates complex from moderate by reasoning budget, not by model
+      // name, so both arrive under the same Claude slug. Mapping by slug
+      // alone collapsed them onto one agy model, and the shim answered the
+      // hardest changes on flash — so a review that fell back was degraded
+      // twice: more calls *and* a weaker model, exactly where it needed the
+      // stronger one.
+      const model = req.thinking ? this.deep_model : (this.models[req.model] ?? req.model);
+      const env = await this.run(prompt, model, this.opts);
       return { content: [{ text: env.response }] };
     },
   };

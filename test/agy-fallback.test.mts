@@ -17,8 +17,10 @@ import {
   AntigravityReasoning,
   AutoAntigravityReasoning,
   type AgyEnvelope,
+  AntigravityClient,
+  AGY_ROUTING,
 } from "../src/providers/antigravity.mjs";
-import { ArgusReasoning, ReviewResult } from "../src/reasoning.mjs";
+import { ArgusReasoning, ReviewResult, ROUTING_TABLE, Complexity } from "../src/reasoning.mjs";
 
 const BIG_DIFF = "diff --git a/x b/x\n" + "+line\n".repeat(400);
 
@@ -205,5 +207,65 @@ describe("auto degrades instead of throwing the review away", () => {
     );
 
     await assert.rejects(() => auto.review(BIG_DIFF), /shim failed too/);
+  });
+});
+
+describe("the fallback keeps the reasoning model", () => {
+  /** The agy model a request actually resolves to, observed at the spawn seam. */
+  async function model_for(req: { model: string; thinking?: unknown }): Promise<string> {
+    let used = "";
+    const client = new AntigravityClient(
+      {},
+      { "claude-sonnet-4-6": "gemini-3.6-flash-high" },
+      "gemini-3.1-pro-high",
+      (async (_p: string, model: string) => {
+        used = model;
+        return envelope({ response: "ok" });
+      }) as never,
+    );
+    await client.messages.create({ ...req, messages: [{ role: "user", content: "x" }] });
+    return used;
+  }
+
+  it("sends a deep-reasoning turn to the complex model, not flash", async () => {
+    // ROUTING_TABLE gives moderate and complex the same Claude slug and
+    // separates them by reasoning budget, so mapping on the slug alone
+    // collapsed them — the shim answered the hardest changes on flash.
+    const asked: Array<{ thinking: boolean; model: string }> = [];
+    const client = {
+      messages: {
+        create: async (req: { model: string; thinking?: unknown; messages: Array<{ content: string }> }) => {
+          const classifying = /Classify the complexity/.test(req.messages?.[0]?.content ?? "");
+          asked.push({ thinking: Boolean(req.thinking), model: req.model });
+          return { content: [{ text: classifying ? "complex" : "Final answer: reviewed." }] };
+        },
+      },
+    };
+
+    await new ArgusReasoning(client as never).review("x\n".repeat(400));
+    const deep = asked.find((a) => a.thinking);
+    assert.ok(deep, "the complex tier must ask for a deep-reasoning turn");
+    assert.equal(deep.model, "claude-sonnet-4-6");
+  });
+
+  it("routes on the reasoning budget, since the slug cannot tell the tiers apart", async () => {
+    assert.equal(await model_for({ model: "claude-sonnet-4-6" }), "gemini-3.6-flash-high");
+    assert.equal(
+      await model_for({ model: "claude-sonnet-4-6", thinking: { type: "adaptive" } }),
+      "gemini-3.1-pro-high",
+      "a deep-reasoning turn must not be answered on flash",
+    );
+  });
+
+  it("agrees with the single-call path at the complex tier", () => {
+    // The two tables disagreed at exactly the tier that matters: the primary
+    // used gemini-3.1-pro-high and its own fallback used flash.
+    assert.equal(AGY_ROUTING[Complexity.COMPLEX], "gemini-3.1-pro-high");
+    assert.equal(ROUTING_TABLE[Complexity.COMPLEX].thinking?.type, "adaptive");
+    assert.equal(
+      ROUTING_TABLE[Complexity.COMPLEX].model,
+      ROUTING_TABLE[Complexity.MODERATE].model,
+      "the slug alone cannot distinguish them — which is why routing reads `thinking`",
+    );
   });
 });
