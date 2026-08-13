@@ -25,7 +25,8 @@ import { ArgusReasoning, OfflineReasoning } from "./reasoning.mjs";
 import {
   AntigravityReasoning,
   AntigravityClient,
-  agy_available,
+  AutoAntigravityReasoning,
+  resolve_route,
   type AgyCallTrace,
   type AgyOptions,
 } from "./providers/antigravity.mjs";
@@ -175,20 +176,22 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
     on_call: (t) => agy_calls.push(t),
   };
 
-  if (provider === "auto") {
-    if (await agy_available()) {
-      provider = "antigravity";
-    } else if (process.env.ANTHROPIC_API_KEY) {
-      provider = "anthropic";
-    } else {
-      console.error("note: no agy binary and no ANTHROPIC_API_KEY — using offline reasoning.");
-      provider = "offline";
-    }
+  // One shared resolver, so this and the MCP path cannot disagree about what
+  // `auto` means or about which provider a record names.
+  const requested = provider;
+  const decided = await resolve_route(provider);
+  provider = decided.route;
+  if (requested === "auto" && provider === "offline") {
+    console.error("note: no agy binary and no ANTHROPIC_API_KEY — using offline reasoning.");
   }
 
   const reasoning =
     provider === "antigravity"
-      ? new AntigravityReasoning(agy_opts)
+      ? decided.auto
+        // auto keeps the single-call path but degrades to the shim rather
+        // than losing the review; explicit antigravity stays one call.
+        ? new AutoAntigravityReasoning(agy_opts)
+        : new AntigravityReasoning(agy_opts)
       : provider === "antigravity-shim"
         ? new ArgusReasoning(new AntigravityClient(agy_opts))
         : provider === "anthropic"
@@ -232,6 +235,14 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
 
   const review = outcome.review!;
   const p_trace = outcome.perception_trace!;
+  // The route that answered, so stdout and the run record cannot disagree.
+  const answered = review.fallback?.used ?? provider;
+  if (review.fallback) {
+    console.error(
+      `note: ${review.fallback.attempted} did not answer after ${review.fallback.attempts} ` +
+        `attempt(s); ${review.fallback.used} produced this review.`,
+    );
+  }
   // A provider can return successfully and still yield nothing. Silence here
   // reads as "clean diff" when it means "the review did not happen".
   if (!review.verdict.trim()) {
@@ -244,7 +255,7 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
   // (what the model thought of the change) — they routinely disagree.
   const tier = review.routing_tier ? `, tier=${review.routing_tier}` : "";
   console.log(
-    `=== Reasoning (${provider}, ${review.complexity}${tier}, conf=${review.confidence.toFixed(2)}) ===`,
+    `=== Reasoning (${answered}, ${review.complexity}${tier}, conf=${review.confidence.toFixed(2)}) ===`,
   );
   // Printed in full, not truncated: this stdout is what a calling agent reads.
   console.log(review.verdict);
@@ -292,7 +303,9 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
       // historical diff records whatever HEAD happens to be, which then joins
       // to the wrong review during ingestion — or to none at all.
       commit: (values.commit as string | undefined) ?? resolve_commit(repo_root),
-      provider,
+      // The path that answered, not the one requested: a fallback review
+      provider: answered,
+      provider_requested: requested,
       invoked_via: "cli",
       calls: agy_calls,
       audit_entries: argus.governance.audit.entries as unknown as Array<Record<string, unknown>>,

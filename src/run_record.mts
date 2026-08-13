@@ -31,6 +31,18 @@ export interface RunRecord {
    */
   commit?: string;
   provider: string;
+  /**
+   * What was asked for, when it differs from `provider`. `auto` resolves at
+   * startup and can degrade again at runtime, so the two are not the same
+   * question.
+   */
+  provider_requested?: string;
+  /**
+   * Set when a fallback produced the verdict. `provider` already names the
+   * path that answered; this records what was tried first and why it was
+   * abandoned, so a degraded review is never mistaken for a clean one.
+   */
+  fallback?: { attempted: string; used: string; reason: string; attempts: number };
   /** Entry point that ran the review: "cli" or "mcp". */
   invoked_via: string;
   /** Distinct models actually used, in call order. Empty for non-agy providers. */
@@ -70,6 +82,8 @@ export interface RunRecordContext {
   /** Usually from resolve_commit(); injectable so build_run_record stays pure. */
   commit?: string;
   provider: string;
+  /** What the caller asked for; `provider` is what actually answered. */
+  provider_requested?: string;
   invoked_via: string;
   calls: AgyCallTrace[];
   /** Present unless governance blocked before an agent was constructed. */
@@ -89,6 +103,8 @@ export function build_run_record(outcome: ReviewOutcome, ctx: RunRecordContext):
     repo_root: path.resolve(ctx.repo_root),
     commit: ctx.commit,
     provider: ctx.provider,
+    provider_requested: ctx.provider_requested,
+    fallback: review?.fallback,
     invoked_via: ctx.invoked_via,
     models: [...new Set(ctx.calls.map((t) => t.model))],
     conversation_ids: ctx.calls.map((t) => t.conversation_id).filter(Boolean),

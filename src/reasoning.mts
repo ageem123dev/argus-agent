@@ -176,6 +176,19 @@ export class ReviewResult {
     public complexity = "simple",
     public routing_tier?: string,
   ) {}
+
+  /**
+   * Set when a fallback produced this review rather than the requested path.
+   * Carried on the result so the run record can name what actually answered:
+   * a verdict attributed to the wrong provider misreports provenance in the
+   * records ingestion later scores.
+   */
+  fallback?: {
+    attempted: string;
+    used: string;
+    reason: string;
+    attempts: number;
+  };
 }
 
 /** Argus's reasoning layer: complexity-routed + CoT + verify. */

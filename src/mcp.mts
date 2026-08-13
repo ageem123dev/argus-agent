@@ -30,6 +30,8 @@ import { ArgusReasoning, OfflineReasoning } from "./reasoning.mjs";
 import {
   AntigravityReasoning,
   AntigravityClient,
+  AutoAntigravityReasoning,
+  resolve_route,
   type AgyCallTrace,
   type AgyOptions,
 } from "./providers/antigravity.mjs";
@@ -42,7 +44,7 @@ import {
 import { format_ingest_report, run_ingest } from "./ingest_run.mjs";
 import { collect_diff, describe_diff } from "./diff.mjs";
 
-const PROVIDERS = ["antigravity", "antigravity-shim", "anthropic", "offline"] as const;
+const PROVIDERS = ["auto", "antigravity", "antigravity-shim", "anthropic", "offline"] as const;
 
 /** Collect a diff from git, without a shell. */
 function git_diff(repo_root: string, range: string): Promise<string> {
@@ -96,10 +98,13 @@ const INPUT = {
     .describe("Project name for memory and audit scoping. Defaults to the repo directory name."),
   provider: z
     .enum(PROVIDERS)
-    .default("antigravity")
+    .default("auto")
     .describe(
-      "Reasoning backend. 'antigravity' is one agy call per review; 'antigravity-shim' " +
-        "makes Argus drive classify/CoT/verify itself at ~20x the calls; 'offline' does no network I/O.",
+      "Reasoning backend. 'auto' (the default) picks by availability and degrades at " +
+        "runtime: one agy call per review, retried once if agy returns nothing, then the " +
+        "shim rather than losing the review. 'antigravity' is exactly one call and fails " +
+        "hard. 'antigravity-shim' drives classify/CoT/verify itself at ~20x the calls. " +
+        "'offline' does no network I/O.",
     ),
   refine: z.boolean().default(true).describe("Run the generator-critic refinement loop."),
   verify_with_tools: z.boolean().default(true).describe("Run deterministic verifiers (lint)."),
@@ -207,12 +212,21 @@ server.registerTool(
     const agy_calls: AgyCallTrace[] = [];
     const agy_opts: AgyOptions = { cwd: repo_root, on_call: (t) => agy_calls.push(t) };
 
+    // One shared resolver, so the CLI and this path cannot disagree about what
+    // `auto` means or about which provider a record names.
+    const { route, auto } = await resolve_route(args.provider);
+    if (args.provider === "auto" && route !== "antigravity") {
+      console.error(`argus: no agy binary — using the ${route} provider.`);
+    }
+
     const reasoning =
-      args.provider === "antigravity"
-        ? new AntigravityReasoning(agy_opts)
-        : args.provider === "antigravity-shim"
+      route === "antigravity"
+        ? auto
+          ? new AutoAntigravityReasoning(agy_opts)
+          : new AntigravityReasoning(agy_opts)
+        : route === "antigravity-shim"
           ? new ArgusReasoning(new AntigravityClient(agy_opts))
-          : args.provider === "anthropic"
+          : route === "anthropic"
             ? new ArgusReasoning()
             : new OfflineReasoning();
 
@@ -263,7 +277,8 @@ server.registerTool(
           project,
           repo_root,
           commit: resolve_commit(repo_root),
-          provider: args.provider,
+          provider: review.fallback?.used ?? route,
+          provider_requested: args.provider,
           invoked_via: "mcp",
           calls: agy_calls,
           audit_entries: argus.governance.audit.entries as unknown as Array<
