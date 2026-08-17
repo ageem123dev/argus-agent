@@ -105,6 +105,20 @@ const PATH_RE = new RegExp(
     `|[\\w.-]+\\.(?:${KNOWN_EXTENSIONS}))\\b`,
 );
 
+/**
+ * Product names that end in a file extension.
+ *
+ * "Node.js" in prose parses as a bare filename and was filed as a lesson
+ * locus — a directory that cannot exist. The bare-filename branch of PATH_RE
+ * has no directory to corroborate it, so a short denylist is the cheapest
+ * guard; a name with a directory (`lib/node.js`) is still a path.
+ */
+const PROSE_NOT_PATHS = new Set([
+  "node.js", "next.js", "nuxt.js", "vue.js", "react.js", "angular.js",
+  "express.js", "three.js", "d3.js", "chart.js", "moment.js", "backbone.js",
+  "ember.js", "discord.js", "socket.js", "video.js",
+]);
+
 /** `path:line` or `path:line:col`, as most reviewers cite a location. */
 const PATH_LINE_RE = new RegExp(PATH_RE.source + "(?::(\\d+))?");
 
@@ -337,6 +351,26 @@ const FINDING_LINE_RE = new RegExp(
 );
 
 /**
+ * The first citation on a line that is actually a path.
+ *
+ * Scanned rather than taken from a single match: the regex finds the leftmost
+ * candidate, so a line reading "blocks the Node.js event loop in app/x.ts:4"
+ * yielded the product name and never reached the real file. Denylisted names
+ * are skipped and the scan continues.
+ */
+function cite_in(line: string): { path: string; line?: number } | undefined {
+  const scan = new RegExp(PATH_LINE_RE.source, "g");
+  for (let m = scan.exec(line); m; m = scan.exec(line)) {
+    const cited = m[1];
+    if (!cited.includes("/") && PROSE_NOT_PATHS.has(cited.toLowerCase())) {
+      continue;
+    }
+    return { path: cited, line: m[2] ? Number(m[2]) : undefined };
+  }
+  return undefined;
+}
+
+/**
  * Parse findings out of review prose — Argus's own verdict format.
  *
  * Line-based and severity-anchored, because that is the only structure the
@@ -353,11 +387,11 @@ export function parse_findings(text: string, source = "argus"): Finding[] {
     if (!line || !FINDING_LINE_RE.test(line)) {
       continue;
     }
-    const location = PATH_LINE_RE.exec(line);
+    const location = cite_in(line);
     const finding = make_finding({
       source,
-      path: location?.[1],
-      line: location?.[2] ? Number(location[2]) : undefined,
+      path: location?.path,
+      line: location?.line,
       severity: SEVERITY_RE.exec(line)?.[1],
       title: line,
     });

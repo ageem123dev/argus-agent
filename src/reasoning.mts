@@ -168,6 +168,18 @@ export async function verify_chain(
  * provider can route to its deepest tier on a change the model then judges
  * simple. Reporting only the former makes the run look cheaper than it was.
  */
+/** Tier ordering, shallowest first. */
+const TIER_DEPTH: Record<Complexity, number> = {
+  [Complexity.SIMPLE]: 0,
+  [Complexity.MODERATE]: 1,
+  [Complexity.COMPLEX]: 2,
+};
+
+/** The deeper of two tiers; a missing floor leaves the classification alone. */
+export function deepest(tier: Complexity, floor?: Complexity): Complexity {
+  return floor && TIER_DEPTH[floor] > TIER_DEPTH[tier] ? floor : tier;
+}
+
 export class ReviewResult {
   constructor(
     public verdict: string,
@@ -208,10 +220,24 @@ export class ArgusReasoning {
     return this._client;
   }
 
-  /** Route the review by complexity, then reason at the right depth. */
-  async review(diff: string): Promise<ReviewResult> {
+  /**
+   * Route the review by complexity, then reason at the right depth.
+   *
+   * `floor` refuses to route below a tier the caller already established.
+   * The classifier reads only the first 500 characters, which on a large
+   * change is one file header — so a diff another path had already judged
+   * complex could be classified simple here and answered on the cheapest
+   * model. That is a silent downgrade of exactly the change least able to
+   * afford one.
+   */
+  async review(diff: string, floor?: Complexity): Promise<ReviewResult> {
     const client = await this.client();
-    const complexity = await classify_complexity(client, `Code review task:\n${diff.slice(0, 500)}`);
+    const classified = await classify_complexity(
+      client,
+      `Code review task:
+${diff.slice(0, 500)}`,
+    );
+    const complexity = deepest(classified, floor);
     if (complexity === Complexity.SIMPLE) {
       return this._quick_review(diff);
     }

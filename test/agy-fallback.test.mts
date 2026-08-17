@@ -20,8 +20,10 @@ import {
   AntigravityClient,
   AGY_ROUTING,
   resolve_route,
+  tier_for_size,
 } from "../src/providers/antigravity.mjs";
-import { ArgusReasoning, ReviewResult, ROUTING_TABLE, Complexity } from "../src/reasoning.mjs";
+import { parse_findings } from "../src/findings.mjs";
+import { ArgusReasoning, ReviewResult, ROUTING_TABLE, Complexity, deepest } from "../src/reasoning.mjs";
 
 const BIG_DIFF = "diff --git a/x b/x\n" + "+line\n".repeat(400);
 
@@ -333,5 +335,82 @@ describe("resolving what `auto` means", () => {
       const d = await resolve_route(p, { available: async () => true });
       assert.deepEqual(d, { route: p, auto: false });
     }
+  });
+});
+
+describe("the fallback does not answer below the tier already established", () => {
+  it("holds the tier when its own classifier says simple", async () => {
+    // Observed live: a 24-file change fell back, the shim's classifier read the
+    // first 500 characters, called it simple, and answered on flash-low — the
+    // cheapest model, on the change least able to afford it.
+    const asked: Array<{ thinking: boolean }> = [];
+    const client = {
+      messages: {
+        create: async (req: { thinking?: unknown; messages: Array<{ content: string }> }) => {
+          const classifying = /Classify the complexity/.test(req.messages?.[0]?.content ?? "");
+          asked.push({ thinking: Boolean(req.thinking) });
+          return { content: [{ text: classifying ? "simple" : "Final answer: reviewed." }] };
+        },
+      },
+    };
+    const primary = new AntigravityReasoning({}, undefined, {
+      empty_retries: 1,
+      run: (async () => envelope()) as never,
+    });
+
+    await new AutoAntigravityReasoning({}, primary, new ArgusReasoning(client as never)).review(
+      "x\n".repeat(400),
+    );
+    assert.ok(
+      asked.some((a) => a.thinking),
+      "a large change must not be answered on the shallow tier",
+    );
+  });
+
+  it("leaves a genuinely small change alone", async () => {
+    const asked: Array<{ thinking: boolean }> = [];
+    const client = {
+      messages: {
+        create: async (req: { thinking?: unknown; messages: Array<{ content: string }> }) => {
+          const classifying = /Classify the complexity/.test(req.messages?.[0]?.content ?? "");
+          asked.push({ thinking: Boolean(req.thinking) });
+          return { content: [{ text: classifying ? "simple" : "Final answer: reviewed." }] };
+        },
+      },
+    };
+    const primary = new AntigravityReasoning({}, undefined, { run: (async () => envelope()) as never });
+    await new AutoAntigravityReasoning({}, primary, new ArgusReasoning(client as never)).review("x\n");
+    assert.ok(!asked.some((a) => a.thinking), "a small diff should not be forced deep");
+  });
+
+  it("routes by size the same way for the primary and the floor", () => {
+    assert.equal(tier_for_size("x\n".repeat(10)), Complexity.SIMPLE);
+    assert.equal(tier_for_size("x\n".repeat(60)), Complexity.MODERATE);
+    assert.equal(tier_for_size("x\n".repeat(400)), Complexity.COMPLEX);
+  });
+
+  it("takes the deeper of a classification and a floor", () => {
+    assert.equal(deepest(Complexity.SIMPLE, Complexity.COMPLEX), Complexity.COMPLEX);
+    assert.equal(deepest(Complexity.COMPLEX, Complexity.SIMPLE), Complexity.COMPLEX);
+    assert.equal(deepest(Complexity.MODERATE, undefined), Complexity.MODERATE);
+  });
+});
+
+describe("prose that looks like a filename", () => {
+  it("does not file a lesson against a product name", () => {
+    // "Node.js" was stored as a lesson locus — a directory that cannot exist.
+    assert.equal(parse_findings("- **[medium]** The Node.js runtime needs a hook.")[0]?.path, undefined);
+  });
+
+  it("still finds the real path when a product name precedes it", () => {
+    // The regex takes the leftmost candidate, so this line yielded "Node.js"
+    // and never reached the file the finding was actually about.
+    const [f] = parse_findings("- **[low]** blocks the Node.js event loop in app/x.ts:4");
+    assert.equal(f?.path, "app/x.ts");
+    assert.equal(f?.line, 4);
+  });
+
+  it("keeps a real file that happens to share the name", () => {
+    assert.equal(parse_findings("- **[high]** `lib/node.js:3` — a real file.")[0]?.path, "lib/node.js");
   });
 });
