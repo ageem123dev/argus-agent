@@ -433,6 +433,22 @@ export interface AntigravityBehaviour {
   run?: typeof run_agy;
 }
 
+/**
+ * The tier a change is routed to by size alone, with no classifier call.
+ *
+ * Exported so the fallback can floor itself at whatever the single-call path
+ * had already decided, rather than re-deriving a shallower answer from the
+ * first 500 characters.
+ */
+export function tier_for_size(diff: string): Complexity {
+  const lines = (diff.match(/\n/g) ?? []).length;
+  return lines < 30
+    ? Complexity.SIMPLE
+    : lines < 100
+      ? Complexity.MODERATE
+      : Complexity.COMPLEX;
+}
+
 export class AntigravityReasoning extends ArgusReasoning {
   constructor(
     private opts: AgyOptions = {},
@@ -445,13 +461,7 @@ export class AntigravityReasoning extends ArgusReasoning {
   override async review(diff: string): Promise<ReviewResult> {
     // No classifier round-trip: size-route locally, and let agy correct the
     // tier in its structured output. Saves a full call per review.
-    const lines = (diff.match(/\n/g) ?? []).length;
-    const tier =
-      lines < 30
-        ? Complexity.SIMPLE
-        : lines < 100
-          ? Complexity.MODERATE
-          : Complexity.COMPLEX;
+    const tier = tier_for_size(diff);
 
     const run = this.behaviour.run ?? run_agy;
     const attempts = Math.max(0, this.behaviour.empty_retries ?? 0) + 1;
@@ -670,7 +680,10 @@ export class AutoAntigravityReasoning extends ArgusReasoning {
         // Nothing here can be improved by trying the same binary again.
         throw e;
       }
-      const result = await this.fallback.review(diff);
+      // Floor the fallback at what the primary had already routed to. Its own
+      // classifier reads 500 characters and answered a large change on the
+      // cheapest model, so a degraded review was degraded twice over.
+      const result = await this.fallback.review(diff, tier_for_size(diff));
       result.fallback = {
         attempted: this.primary_label,
         used: this.fallback_label,
