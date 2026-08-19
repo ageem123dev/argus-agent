@@ -135,6 +135,11 @@ and POSIX (`~/.local/bin/agy`), or set `ARGUS_AGY_BIN`. Model slugs live in
 `AGY_ROUTING` in [`src/providers/antigravity.mts`](src/providers/antigravity.mts) —
 run `agy models` to see what your account offers.
 
+Reviews run on **Gemini 3.7 Flash** at two levels: `-low` for simple changes,
+`-high` for everything else. Three complexity tiers over two levels means moderate
+and complex share `-high` — they still differ in how the shim reasons, but not in
+which model answers.
+
 `agy` accepts a prompt only as an argv value (no stdin, no prompt-file flag), so
 prompts over 6k chars are spilled to a temp file that `agy` is told to read, with
 `--add-dir` making that file readable without a permission prompt.

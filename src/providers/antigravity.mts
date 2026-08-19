@@ -58,17 +58,28 @@ export function resolve_agy_bin(): string {
  * Reasoning effort is baked into the agy slug (`-low`/`-medium`/`-high`), so
  * the complexity tiers map straight onto slugs and `--effort` is redundant.
  * Run `agy models` to see what your account currently offers.
+ *
+ * Gemini 3.7 Flash at two levels, low and high. Three tiers over two levels
+ * means moderate and complex share `-high`: they still differ in how the shim
+ * reasons (a deep pass rather than chain-of-thought plus verification), but no
+ * longer in which model answers.
+ *
+ * This retires gemini-3.1-pro-high, which is what the large-diff failures were
+ * observed on — six consecutive reviews of a 24-file change returned either an
+ * empty SUCCESS or a non-zero exit. Whether that was the model or the
+ * single-call schema shape was never settled, so the retry and fallback stay:
+ * they cost nothing when nothing fails.
  */
 export const AGY_ROUTING: Record<Complexity, string> = {
-  [Complexity.SIMPLE]: "gemini-3.6-flash-low",
-  [Complexity.MODERATE]: "gemini-3.6-flash-high",
-  [Complexity.COMPLEX]: "gemini-3.1-pro-high",
+  [Complexity.SIMPLE]: "gemini-3.7-flash-low",
+  [Complexity.MODERATE]: "gemini-3.7-flash-high",
+  [Complexity.COMPLEX]: "gemini-3.7-flash-high",
 };
 
 /** Claude slugs used by ROUTING_TABLE → agy slugs, for the shim client. */
 export const CLAUDE_TO_AGY: Record<string, string> = {
-  "claude-haiku-4-5-20251001": "gemini-3.6-flash-low",
-  "claude-sonnet-4-6": "gemini-3.6-flash-high",
+  "claude-haiku-4-5-20251001": "gemini-3.7-flash-low",
+  "claude-sonnet-4-6": "gemini-3.7-flash-high",
 };
 
 // ---------------------------------------------------------------------------
