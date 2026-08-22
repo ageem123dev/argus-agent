@@ -35,6 +35,15 @@ export interface IngestSourceConfig {
 }
 
 export interface ArgusConfig {
+  /**
+   * Lessons pooled across projects.
+   *
+   * A path, because the pool has to sit outside any one repo. Belongs in
+   * `.argus/config.json` rather than the committed file: it is machine
+   * -specific, like the CodeRabbit store path. Unset means no pooling, which
+   * is the right default for a repo that stands alone.
+   */
+  memory?: { shared?: string };
   ingest?: {
     coderabbit?: IngestSourceConfig;
   };
@@ -101,6 +110,7 @@ function merge(base: ArgusConfig, over: ArgusConfig | null): ArgusConfig {
       ...over.ingest,
       coderabbit: { ...base.ingest?.coderabbit, ...over.ingest?.coderabbit },
     },
+    memory: { ...base.memory, ...over.memory },
   };
 }
 

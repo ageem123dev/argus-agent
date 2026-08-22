@@ -19,8 +19,8 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 
 import { Argus } from "./argus.mjs";
-import { ArgusMemory, HierarchicalMemory } from "./memory.mjs";
-import { JsonlVectorDB } from "./memory_store.mjs";
+import { ArgusMemory, HierarchicalMemory, seed_shared } from "./memory.mjs";
+import { JsonlVectorDB, default_memory_path } from "./memory_store.mjs";
 import { ArgusReasoning, OfflineReasoning } from "./reasoning.mjs";
 import {
   AntigravityReasoning,
@@ -37,7 +37,7 @@ import {
   resolve_commit,
 } from "./run_record.mjs";
 import { init } from "./init.mjs";
-import { parse_severities } from "./config.mjs";
+import { load_config, parse_severities } from "./config.mjs";
 import { collect_diff, describe_diff } from "./diff.mjs";
 import { format_ingest_report, run_ingest } from "./ingest_run.mjs";
 
@@ -67,6 +67,7 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
       base: { type: "string" },
       "no-untracked": { type: "boolean", default: false },
       out: { type: "string" },
+      shared: { type: "string" },
       force: { type: "boolean", default: false },
     },
   });
@@ -116,6 +117,30 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
       );
       return 3;
     }
+    return 0;
+  }
+
+  // `argus share` — seed the cross-project pool from this repo's lessons.
+  // A project that has never run Argus contributes nothing, so the pool would
+  // otherwise stay empty until the newer repo had built its own history.
+  if (positionals[0] === "share") {
+    const repo_root = values.repo as string;
+    const cfg = load_config(repo_root).config.memory?.shared;
+    const target = (values.shared as string | undefined) ?? cfg;
+    if (!target) {
+      console.error(
+        "error: no shared pool configured. Set memory.shared in .argus/config.json, " +
+          "or pass --shared <file>.",
+      );
+      return 2;
+    }
+    const local = new JsonlVectorDB((values.memory as string | undefined) ?? default_memory_path(repo_root));
+    const shared = new JsonlVectorDB(target);
+    const { contributed, skipped } = seed_shared(local, shared);
+    console.log(`  read     ${local.size} lesson(s) from ${repo_root}`);
+    console.log(`  carried  ${contributed} (language, topic) prior(s)`);
+    console.log(`  skipped  ${skipped} with no topic — a place alone does not travel`);
+    console.log(`  pool     ${shared.size} prior(s) in ${target}`);
     return 0;
   }
 

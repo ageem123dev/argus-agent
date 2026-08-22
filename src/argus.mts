@@ -18,6 +18,7 @@
 import { extract_modified_files, gather_review_context, PerceptionTrace } from "./perception.mjs";
 import { ArgusMemory, HierarchicalMemory } from "./memory.mjs";
 import { JsonlVectorDB, default_memory_path } from "./memory_store.mjs";
+import { load_config } from "./config.mjs";
 import { ArgusReasoning, ReviewResult } from "./reasoning.mjs";
 import { ArgusAction, ActionTrace } from "./action.mjs";
 import { ArgusReflection } from "./reflection.mjs";
@@ -119,7 +120,13 @@ export class Argus {
     const file = default_memory_path(repo_root);
     let memory = this._memory_by_root.get(file);
     if (!memory) {
-      memory = new ArgusMemory(new HierarchicalMemory(new JsonlVectorDB(file)));
+      // The pool is opened per repo because its path is configured per repo,
+      // even though the file itself is shared between them.
+      const shared = load_config(repo_root).config.memory?.shared;
+      memory = new ArgusMemory(
+        new HierarchicalMemory(new JsonlVectorDB(file)),
+        shared ? new JsonlVectorDB(shared) : undefined,
+      );
       this._memory_by_root.set(file, memory);
     }
     return memory;

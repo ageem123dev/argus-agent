@@ -260,6 +260,43 @@ not, so `seen` stays a count of independent confirmations. Every read and write 
 non-throwing — a memory that cannot be opened degrades to amnesia, never to a failed
 review, and reports itself in the CLI's `=== Memory ===` block.
 
+### Sharing lessons between projects
+
+A locus is repo-relative: `core/findings/**` means nothing in a sibling project,
+and pooling raw lessons spends recall slots on directory names the other repo does
+not have. What generalises is the pair that survives the move — a language and an
+issue class.
+
+Set `memory.shared` in `.argus/config.json` (machine-local, like the CodeRabbit
+path) in each repo, pointing at one file:
+
+```jsonc
+{ "memory": { "shared": "C:\Users\you\.argus\pool.jsonl" } }
+```
+
+Each review then contributes the portable half of what it learns, and reads back
+priors like:
+
+```
+Across projects, TypeScript changes have repeatedly had error handling problems.
+```
+
+A pooled prior **never displaces a local lesson** — it fills only the slots local
+memory did not claim, because a lesson about this exact code is worth more than a
+prior about the team. Priors are selected by how much evidence stands behind them,
+not by keyword overlap: they carry no place, so they share no words with a query
+made of changed paths, and overlap ranking returned nothing at all.
+
+A repo that has never run Argus contributes nothing, so seed the pool from one
+that has:
+
+```sh
+node dist/cli.mjs share --repo /path/to/established-repo
+```
+
+It is idempotent — re-seeding confirms priors rather than duplicating them.
+
+
 Records are scoped by `project`, and `.argus/` is gitignored, so lessons are local to
 one checkout. Nothing syncs them to CI or another machine.
 
