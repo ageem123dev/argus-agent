@@ -19,6 +19,7 @@ import {
   type AgyEnvelope,
   AntigravityClient,
   AGY_ROUTING,
+  CLAUDE_TO_AGY,
   resolve_route,
   tier_for_size,
 } from "../src/providers/antigravity.mjs";
@@ -213,14 +214,16 @@ describe("auto degrades instead of throwing the review away", () => {
   });
 });
 
-describe("the fallback keeps the reasoning model", () => {
-  /** The agy model a request actually resolves to, observed at the spawn seam. */
+describe("the fallback keeps the reasoning tier", () => {
+  /** The agy model a request resolves to, observed at the spawn seam. */
   async function model_for(req: { model: string; thinking?: unknown }): Promise<string> {
     let used = "";
+    // Deliberately not the real slugs: the rule under test is that a
+    // reasoning turn takes the deep model, whatever the tables happen to say.
     const client = new AntigravityClient(
       {},
-      { "claude-sonnet-4-6": "gemini-3.6-flash-high" },
-      "gemini-3.1-pro-high",
+      { "claude-sonnet-4-6": "mapped-by-slug" },
+      "deep-model",
       (async (_p: string, model: string) => {
         used = model;
         return envelope({ response: "ok" });
@@ -230,10 +233,19 @@ describe("the fallback keeps the reasoning model", () => {
     return used;
   }
 
-  it("sends a deep-reasoning turn to the complex model, not flash", async () => {
+  it("routes on the reasoning budget, since the slug cannot tell the tiers apart", async () => {
     // ROUTING_TABLE gives moderate and complex the same Claude slug and
-    // separates them by reasoning budget, so mapping on the slug alone
-    // collapsed them — the shim answered the hardest changes on flash.
+    // separates them by reasoning budget. Mapping on the slug alone collapsed
+    // them, so the shim answered the hardest changes on the shallower model.
+    assert.equal(await model_for({ model: "claude-sonnet-4-6" }), "mapped-by-slug");
+    assert.equal(
+      await model_for({ model: "claude-sonnet-4-6", thinking: { type: "adaptive" } }),
+      "deep-model",
+      "a deep-reasoning turn must not fall back to the slug mapping",
+    );
+  });
+
+  it("sends the complex tier a deep-reasoning turn", async () => {
     const asked: Array<{ thinking: boolean; model: string }> = [];
     const client = {
       messages: {
@@ -251,25 +263,45 @@ describe("the fallback keeps the reasoning model", () => {
     assert.equal(deep.model, "claude-sonnet-4-6");
   });
 
-  it("routes on the reasoning budget, since the slug cannot tell the tiers apart", async () => {
-    assert.equal(await model_for({ model: "claude-sonnet-4-6" }), "gemini-3.6-flash-high");
-    assert.equal(
-      await model_for({ model: "claude-sonnet-4-6", thinking: { type: "adaptive" } }),
-      "gemini-3.1-pro-high",
-      "a deep-reasoning turn must not be answered on flash",
-    );
-  });
-
-  it("agrees with the single-call path at the complex tier", () => {
-    // The two tables disagreed at exactly the tier that matters: the primary
-    // used gemini-3.1-pro-high and its own fallback used flash.
-    assert.equal(AGY_ROUTING[Complexity.COMPLEX], "gemini-3.1-pro-high");
-    assert.equal(ROUTING_TABLE[Complexity.COMPLEX].thinking?.type, "adaptive");
+  it("keeps the two routing tables agreeing by construction", async () => {
+    // The literal slugs move; what must not move is that the shim's deep
+    // model is the same one the single-call path uses for the complex tier.
+    // Pinning the slug itself would only pin today's model choice.
+    let used = "";
+    const client = new AntigravityClient({}, undefined, undefined, (async (_p: string, model: string) => {
+      used = model;
+      return envelope({ response: "ok" });
+    }) as never);
+    await client.messages.create({
+      model: "claude-sonnet-4-6",
+      thinking: { type: "adaptive" },
+      messages: [{ role: "user", content: "x" }],
+    });
+    assert.equal(used, AGY_ROUTING[Complexity.COMPLEX]);
     assert.equal(
       ROUTING_TABLE[Complexity.COMPLEX].model,
       ROUTING_TABLE[Complexity.MODERATE].model,
       "the slug alone cannot distinguish them — which is why routing reads `thinking`",
     );
+    assert.equal(ROUTING_TABLE[Complexity.COMPLEX].thinking?.type, "adaptive");
+    // The suffix check alone would pass a different but still valid `-high`
+    // slug on one table only, which is exactly how the two drifted apart
+    // before. Pin the mapping, not the shape.
+    assert.equal(
+      CLAUDE_TO_AGY[ROUTING_TABLE[Complexity.SIMPLE].model],
+      AGY_ROUTING[Complexity.SIMPLE],
+    );
+    assert.equal(
+      CLAUDE_TO_AGY[ROUTING_TABLE[Complexity.MODERATE].model],
+      AGY_ROUTING[Complexity.MODERATE],
+    );
+  });
+
+  it("uses only the levels the routing is meant to offer", () => {
+    // Two levels, low and high. A stray `-medium` would be a typo, not a choice.
+    for (const slug of [...Object.values(AGY_ROUTING), ...Object.values(CLAUDE_TO_AGY)]) {
+      assert.match(slug, /-(low|high)$/, `${slug} is not a low or high tier`);
+    }
   });
 });
 
