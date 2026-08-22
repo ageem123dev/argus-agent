@@ -132,6 +132,28 @@ export class JsonlVectorDB implements VectorDB {
     return rank_scoped(pool, query, top_k, filter).map((r) => ({ text: r.text, score: r.score }));
   }
 
+  /**
+   * Strongest priors in these languages, best first.
+   *
+   * Ranked by severity and by how many places the topic has been seen in,
+   * because that is what a placeless prior has instead of relevance. A
+   * language the pool has never seen yields nothing rather than the
+   * next-best thing in some other language.
+   */
+  priors(languages: string[], top_k: number): Array<{ text: string; score: number }> {
+    if (!languages.length) {
+      // No recognised language in the change means no prior applies. Treating
+      // an empty list as "no filter" handed such a change priors in every
+      // language, which is the opposite of what scoping is for.
+      return [];
+    }
+    return [...this._records.values()]
+      .filter((r) => r.language !== undefined && languages.includes(r.language))
+      .sort((a, b) => b.importance - a.importance || b.seen - a.seen)
+      .slice(0, Math.max(0, top_k))
+      .map((r) => ({ text: r.text, score: r.importance }));
+  }
+
   describe(): Record<string, unknown> {
     return {
       store: "jsonl",

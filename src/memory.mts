@@ -79,6 +79,16 @@ export interface VectorDB {
    * amnesia without knowing which implementation is attached.
    */
   describe?(): Record<string, unknown>;
+  /**
+   * Strongest priors in the given languages, best first.
+   *
+   * Separate from `search` because keyword overlap is the wrong instrument
+   * here. A prior carries no place, so it shares no tokens with a query made
+   * of changed paths, and overlap ranking returned nothing at all — the pool
+   * looked empty to every review. What ranks a placeless prior is how much
+   * evidence stands behind it, not how much its wording resembles a path.
+   */
+  priors?(languages: string[], top_k: number): Array<{ text: string; score: number }>;
 }
 
 // ---------------------------------------------------------------------------
@@ -488,10 +498,38 @@ export function lessons_from_findings(
 // The agent's memory layer
 // ---------------------------------------------------------------------------
 
+/**
+ * A lesson stripped of everything that does not travel.
+ *
+ * A locus is repo-relative: `core/findings/**` means nothing in a sibling
+ * project, and pooling raw lessons spends recall slots on directory names the
+ * other repo does not have. What generalizes is the pair that survives the
+ * move — a language and an issue class. "This team keeps getting error
+ * handling wrong in TypeScript" is evidence about the team; where it happened
+ * is evidence about one repo.
+ *
+ * Carrying no `project` is deliberate: `matches_filter` only rejects on a
+ * project mismatch when the record states one, so an unowned prior stays
+ * eligible everywhere. Carrying no `locus` keeps it out of the scoped tier,
+ * so it can only ever fill a slot a local lesson did not claim.
+ */
+export function shared_prior(lesson: DistilledLesson): { text: string; language?: string } | undefined {
+  if (!lesson.topic || !lesson.language) {
+    return undefined; // nothing to carry: a place alone does not travel
+  }
+  const language = language_name(lesson.language) ?? lesson.language;
+  return {
+    text: `Across projects, ${language} changes have repeatedly had ${lesson.topic} problems.`,
+    language: lesson.language,
+  };
+}
+
 /** What one review did with memory — surfaced in ReviewOutcome and run records. */
 export interface MemoryTrace {
   recalled: string[];
   stored: string[];
+  /** Cross-project priors that filled slots no local lesson claimed. */
+  from_shared: string[];
   /** Store class actually in use — the difference between learning and amnesia. */
   store: string;
 }
@@ -500,8 +538,20 @@ export interface MemoryTrace {
 export class ArgusMemory {
   trace: MemoryTrace;
 
-  constructor(public memory: HierarchicalMemory = new HierarchicalMemory(new InMemoryVectorDB())) {
-    this.trace = { recalled: [], stored: [], store: memory.vector_db.constructor.name };
+  constructor(
+    public memory: HierarchicalMemory = new HierarchicalMemory(new InMemoryVectorDB()),
+    /**
+     * Priors pooled across projects. Optional: without one this behaves
+     * exactly as before, which is what a single-project repo wants.
+     */
+    public shared?: VectorDB,
+  ) {
+    this.trace = {
+      recalled: [],
+      stored: [],
+      from_shared: [],
+      store: memory.vector_db.constructor.name,
+    };
   }
 
   /** Distill the verdict into generalizations and persist them. */
@@ -515,6 +565,21 @@ export class ArgusMemory {
       });
     }
     this.memory.consolidate();
+
+    // Contribute what travels. The local store keeps the placed lesson; the
+    // pool gets the language-and-topic pair, which is the part that is
+    // evidence about the team rather than about one directory.
+    for (const lesson of lessons) {
+      const prior = shared_prior(lesson);
+      if (prior && this.shared) {
+        this.shared.upsert({
+          text: prior.text,
+          // No project and no locus: an unowned, placeless prior is eligible
+          // everywhere and can never outrank a lesson about this very code.
+          metadata: { language: prior.language, importance: lesson.importance, source: "shared" },
+        });
+      }
+    }
     this.trace.stored = lessons.map((l) => l.text);
     return this.trace.stored;
   }
@@ -535,7 +600,64 @@ export class ArgusMemory {
       3,
       recall_filter(project, changed_files),
     );
-    this.trace.recalled = recalled;
-    return recalled;
+    // Only the slots local memory did not claim. A prior about the team is
+    // worth less than a lesson about this exact place, so it never displaces
+    // one — and it is fetched directly rather than through retrieve(), which
+    // would file a cross-project prior into this repo's own store on the next
+    // consolidation.
+    const from_shared: string[] = [];
+    if (this.shared && recalled.length < 3) {
+      const languages = languages_of(changed_files);
+      const pooled = this.shared.priors
+        ? this.shared.priors(languages, 3 - recalled.length)
+        : this.shared.search(query, 3 - recalled.length, { languages });
+      for (const hit of pooled) {
+        if (!recalled.includes(hit.text)) {
+          from_shared.push(hit.text);
+        }
+      }
+    }
+    this.trace.recalled = [...recalled, ...from_shared];
+    this.trace.from_shared = from_shared;
+    return this.trace.recalled;
   }
+}
+
+/**
+ * Seed a pool from a repo's existing lessons.
+ *
+ * A project that has never run Argus contributes nothing, so without this the
+ * pool starts empty and the newer repo gets no benefit for weeks. Everything
+ * already learned is re-derived into its portable form — which is also why this
+ * is idempotent: the pool dedupes on text, so re-seeding only bumps counts.
+ */
+export function seed_shared(
+  local: VectorDB,
+  shared: VectorDB,
+): { contributed: number; skipped: number; failed?: string } {
+  const records = typeof (local as { records?: unknown }).records === "function"
+    ? (local as unknown as { records(): Array<{ text: string; language?: string; locus?: string; importance?: number }> }).records()
+    : [];
+  let contributed = 0;
+  let skipped = 0;
+  for (const r of records) {
+    const topic = /Look harder in (?:[A-Za-z#+.]+ under )?.*? for (.+?)\.$/.exec(r.text)?.[1];
+    const prior = topic && r.language
+      ? shared_prior({ text: r.text, importance: r.importance ?? 0.6, topic, language: r.language })
+      : undefined;
+    if (!prior) {
+      // No topic, or no language: either way there is nothing that travels.
+      skipped += 1;
+      continue;
+    }
+    shared.upsert({
+      text: prior.text,
+      metadata: { language: prior.language, importance: r.importance ?? 0.6, source: "shared" },
+    });
+    contributed += 1;
+  }
+  // The store never throws — it records the failure instead — so a read-only
+  // or missing target would otherwise report priors carried and persist none.
+  const failed = (shared as { last_error?: string }).last_error;
+  return { contributed, skipped, ...(failed ? { failed } : {}) };
 }
