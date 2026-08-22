@@ -136,11 +136,15 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
     }
     const local = new JsonlVectorDB((values.memory as string | undefined) ?? default_memory_path(repo_root));
     const shared = new JsonlVectorDB(target);
-    const { contributed, skipped } = seed_shared(local, shared);
+    const { contributed, skipped, failed } = seed_shared(local, shared);
     console.log(`  read     ${local.size} lesson(s) from ${repo_root}`);
     console.log(`  carried  ${contributed} (language, topic) prior(s)`);
-    console.log(`  skipped  ${skipped} with no topic — a place alone does not travel`);
+    console.log(`  skipped  ${skipped} with no topic or no language — neither travels`);
     console.log(`  pool     ${shared.size} prior(s) in ${target}`);
+    if (failed) {
+      console.error(`error: the pool could not be written (${failed}) — nothing was persisted.`);
+      return 1;
+    }
     return 0;
   }
 
@@ -175,6 +179,8 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
         "                 [--offline] [--no-tools] [--no-refine]\n" +
         "                 [--record <file>] [--no-record]\n" +
         "                 [--memory <file>] [--no-memory] [--commit <sha>]\n" +
+        "       argus share [--repo <path>] [--shared <file>]\n" +
+        "                 seed the cross-project lesson pool from this repo\n" +
         "       argus init [repo] [--force]   scaffold Claude Code integration\n" +
         "       argus ingest [--repo <path>] [--from <file|dir>]\n" +
         "                 [--severities critical,major] [--commit <sha>] [--dry-run]\n" +

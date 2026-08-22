@@ -144,6 +144,23 @@ describe("a pooled prior never outranks a local lesson", () => {
   });
 });
 
+describe("a change in no recognised language", () => {
+  it("gets no prior at all, rather than one in every language", () => {
+    // languages_of returns [] when nothing maps to a known extension, and
+    // treating that as "no filter" handed such a change priors in every
+    // language — the opposite of what scoping is for.
+    const pool = new JsonlVectorDB(file("pool"));
+    pool.upsert({
+      text: "Across projects, TypeScript changes have repeatedly had concurrency problems.",
+      metadata: { language: "typescript", importance: 0.9 },
+    });
+    assert.deepEqual(pool.priors([], 3), []);
+
+    const mem = new ArgusMemory(new HierarchicalMemory(new JsonlVectorDB(file("empty"))), pool);
+    assert.deepEqual(mem.before_review("p", ["Makefile", "LICENSE"]), []);
+  });
+});
+
 describe("seeding a pool from a repo that already has history", () => {
   it("carries the portable lessons and reports what it left behind", () => {
     const local = new JsonlVectorDB(file("local"));
@@ -156,6 +173,20 @@ describe("seeding a pool from a repo that already has history", () => {
     assert.ok(contributed >= 1);
     assert.equal(contributed + skipped, local.size);
     assert.ok(pool.records().every((r) => !r.locus && !r.project));
+  });
+
+  it("reports a pool it could not write, rather than claiming success", () => {
+    // The store never throws — it records the failure — so a read-only or
+    // unreachable target would otherwise report priors carried and persist
+    // none, with a zero exit code.
+    const local = new JsonlVectorDB(file("local"));
+    new ArgusMemory(new HierarchicalMemory(local)).after_review(TS_FINDING, "p");
+
+    // A directory where the file should be: every write fails.
+    const blocked = path.join(tmp, `blocked-${Date.now()}`, "pool.jsonl");
+    fs.mkdirSync(blocked, { recursive: true });
+    const result = seed_shared(local, new JsonlVectorDB(blocked));
+    assert.ok(result.failed, "a failed write must not read as a successful seed");
   });
 
   it("is idempotent — re-seeding confirms rather than duplicates", () => {

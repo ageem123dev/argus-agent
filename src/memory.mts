@@ -631,7 +631,10 @@ export class ArgusMemory {
  * already learned is re-derived into its portable form — which is also why this
  * is idempotent: the pool dedupes on text, so re-seeding only bumps counts.
  */
-export function seed_shared(local: VectorDB, shared: VectorDB): { contributed: number; skipped: number } {
+export function seed_shared(
+  local: VectorDB,
+  shared: VectorDB,
+): { contributed: number; skipped: number; failed?: string } {
   const records = typeof (local as { records?: unknown }).records === "function"
     ? (local as unknown as { records(): Array<{ text: string; language?: string; locus?: string; importance?: number }> }).records()
     : [];
@@ -639,18 +642,11 @@ export function seed_shared(local: VectorDB, shared: VectorDB): { contributed: n
   let skipped = 0;
   for (const r of records) {
     const topic = /Look harder in (?:[A-Za-z#+.]+ under )?.*? for (.+?)\.$/.exec(r.text)?.[1];
-    if (!topic || !r.language) {
-      // A lesson with only a place has nothing that travels.
-      skipped += 1;
-      continue;
-    }
-    const prior = shared_prior({
-      text: r.text,
-      importance: r.importance ?? 0.6,
-      topic,
-      language: r.language,
-    });
+    const prior = topic && r.language
+      ? shared_prior({ text: r.text, importance: r.importance ?? 0.6, topic, language: r.language })
+      : undefined;
     if (!prior) {
+      // No topic, or no language: either way there is nothing that travels.
       skipped += 1;
       continue;
     }
@@ -660,5 +656,8 @@ export function seed_shared(local: VectorDB, shared: VectorDB): { contributed: n
     });
     contributed += 1;
   }
-  return { contributed, skipped };
+  // The store never throws — it records the failure instead — so a read-only
+  // or missing target would otherwise report priors carried and persist none.
+  const failed = (shared as { last_error?: string }).last_error;
+  return { contributed, skipped, ...(failed ? { failed } : {}) };
 }

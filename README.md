@@ -271,13 +271,16 @@ Set `memory.shared` in `.argus/config.json` (machine-local, like the CodeRabbit
 path) in each repo, pointing at one file:
 
 ```jsonc
-{ "memory": { "shared": "C:\Users\you\.argus\pool.jsonl" } }
+{ "memory": { "shared": "C:/Users/you/.argus/pool.jsonl" } }
 ```
+
+Forward slashes on Windows too — a backslash starts an escape in JSON, so
+`"C:\Users\you"` is not a valid string.
 
 Each review then contributes the portable half of what it learns, and reads back
 priors like:
 
-```
+```text
 Across projects, TypeScript changes have repeatedly had error handling problems.
 ```
 

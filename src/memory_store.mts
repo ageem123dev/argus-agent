@@ -141,8 +141,14 @@ export class JsonlVectorDB implements VectorDB {
    * next-best thing in some other language.
    */
   priors(languages: string[], top_k: number): Array<{ text: string; score: number }> {
+    if (!languages.length) {
+      // No recognised language in the change means no prior applies. Treating
+      // an empty list as "no filter" handed such a change priors in every
+      // language, which is the opposite of what scoping is for.
+      return [];
+    }
     return [...this._records.values()]
-      .filter((r) => !languages.length || (r.language && languages.includes(r.language)))
+      .filter((r) => r.language !== undefined && languages.includes(r.language))
       .sort((a, b) => b.importance - a.importance || b.seen - a.seen)
       .slice(0, Math.max(0, top_k))
       .map((r) => ({ text: r.text, score: r.importance }));
