@@ -318,7 +318,14 @@ export function classify_topic(text: string): string | undefined {
 
 /** Fill in the derived fields an adapter should not have to compute itself. */
 export function make_finding(
-  partial: Omit<Finding, "severity" | "locus" | "topic"> & { severity?: string },
+  partial: Omit<Finding, "severity" | "locus" | "topic"> & {
+    severity?: string;
+    /**
+     * The claim with its file citation removed, when the caller can separate
+     * the two. Classification reads this in preference to the whole line.
+     */
+    claim?: string;
+  },
 ): Finding {
   // `language` may be supplied by an adapter that knows better than the
   // extension does; otherwise it is derived below.
@@ -331,7 +338,17 @@ export function make_finding(
     locus: locus_from_path(path),
     // Category first: a reviewer's own label is a better signal than our
     // keyword scan over its prose, when it bothered to provide one.
-    topic: classify_topic(`${partial.category ?? ""} ${partial.title}`),
+      // Classified on the claim, not the line that carries it. The path is
+      // part of that line, so its words competed with the words describing
+      // the defect: `src/auth/worker.ts — a race on retry` classified as
+      // authentication rather than concurrency, purely because of where the
+      // file sits. A mislabelled topic is then deduped against the other
+      // findings in that directory, so the real lesson is never stored — and
+      // topics are what travel to other projects, so a wrong one propagates.
+      //
+      // Category still leads: a reviewer's own label beats our keyword scan
+      // over its prose, when it bothered to provide one.
+      topic: classify_topic(`${partial.category ?? ""} ${partial.claim ?? partial.title}`),
   };
 }
 
@@ -388,12 +405,17 @@ export function parse_findings(text: string, source = "argus"): Finding[] {
       continue;
     }
     const location = cite_in(line);
+    // Everything the line says, minus where it says it about.
+    const claim = location
+      ? line.replace(location.path, " ").replace(/\s+/g, " ").trim()
+      : line;
     const finding = make_finding({
       source,
       path: location?.path,
       line: location?.line,
       severity: SEVERITY_RE.exec(line)?.[1],
       title: line,
+      claim,
     });
 
     // A verdict routinely states each finding twice: once in the model's prose
