@@ -80,6 +80,56 @@ describe("findings", () => {
     assert.deepEqual(parse_findings("- see [note] in src/a.mts:3 for context"), []);
   });
 
+  it("classifies the defect, not the directory it sits in", () => {
+    // The whole line fed classification, path included, so the path competed
+    // with the words describing the defect. The same race condition became an
+    // auth lesson purely because the file sat under src/auth/.
+    const race = (dir: string) =>
+      parse_findings(`- **[high]** \`${dir}/worker.ts:1\` — a race on retry.`)[0]?.topic;
+
+    assert.equal(race("src/billing"), "concurrency");
+    for (const dir of ["src/auth", "src/session", "src/crypto", "src/locks"]) {
+      assert.equal(race(dir), "concurrency", `${dir} must not rename the defect`);
+    }
+  });
+
+  it("no longer collapses distinct defects filed under a topical directory", () => {
+    // A mislabelled topic is deduped against the other findings in that
+    // directory, so the real lesson is never stored at all.
+    const verdict = [
+      "- **[high]** `src/auth/worker.ts:1` — a race on retry.",
+      "- **[high]** `src/auth/reader.ts:1` — an unclosed file handle.",
+      "- **[high]** `src/auth/parser.ts:1` — unchecked array bounds.",
+    ].join("\n");
+
+    assert.deepEqual(
+      parse_findings(verdict).map((f) => f.topic),
+      ["concurrency", "resource leaks", "input validation"],
+    );
+  });
+
+  it("still reads a genuine auth defect as auth, wherever it lives", () => {
+    // The claim, not the path, is what should carry it.
+    assert.equal(
+      parse_findings("- **[high]** `src/billing/charge.ts:2` — the jwt signature is never verified.")[0]
+        ?.topic,
+      "authentication and token handling",
+    );
+  });
+
+  it("keeps using a reviewer's own category when it supplies one", () => {
+    // Category still leads: an explicit label beats our keyword scan.
+    assert.equal(
+      make_finding({
+        source: "coderabbit",
+        path: "src/billing/charge.ts",
+        title: "this looks wrong",
+        category: "SQL injection",
+      }).topic,
+      "injection and untrusted input",
+    );
+  });
+
   it("keeps underscores in a path, which markdown emphasis rules would eat", () => {
     // snake_case is the Python convention, and stripping "_" as emphasis
     // rewrote every such path: agent/watchdog_agent/tools_client.py became
