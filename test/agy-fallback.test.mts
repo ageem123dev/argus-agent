@@ -284,6 +284,17 @@ describe("the fallback keeps the reasoning tier", () => {
       "the slug alone cannot distinguish them — which is why routing reads `thinking`",
     );
     assert.equal(ROUTING_TABLE[Complexity.COMPLEX].thinking?.type, "adaptive");
+    // The suffix check alone would pass a different but still valid `-high`
+    // slug on one table only, which is exactly how the two drifted apart
+    // before. Pin the mapping, not the shape.
+    assert.equal(
+      CLAUDE_TO_AGY[ROUTING_TABLE[Complexity.SIMPLE].model],
+      AGY_ROUTING[Complexity.SIMPLE],
+    );
+    assert.equal(
+      CLAUDE_TO_AGY[ROUTING_TABLE[Complexity.MODERATE].model],
+      AGY_ROUTING[Complexity.MODERATE],
+    );
   });
 
   it("uses only the levels the routing is meant to offer", () => {
