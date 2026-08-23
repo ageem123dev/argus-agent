@@ -30,6 +30,10 @@ export class PerceptionTrace {
   tokens_considered = 0;
   tokens_selected = 0;
   dropped_files: Array<[string, string]> = [];
+  /** Paths that exist but could not be read, with how they were reached. */
+  unreadable: Array<[string, string]> = [];
+  /** Paths that resolved outside the repository and were refused. */
+  outside_repo: Array<[string, string]> = [];
 
   get selectivity(): number {
     if (this.tokens_considered === 0) return 0;
@@ -37,8 +41,65 @@ export class PerceptionTrace {
   }
 }
 
-function read_text(full: string): string {
-  return fs.readFileSync(full, { encoding: "utf-8" });
+/**
+ * Best-effort read: the contents, or null for anything that is not a file we
+ * can read.
+ *
+ * Context gathering must not be able to fail a review. existsSync answers yes
+ * for a directory, so a specifier resolving to one reached readFileSync and
+ * threw EISDIR, which escaped and killed the whole review — and a specifier is
+ * only text: one sitting inside a string literal in a test fixture, which the
+ * module never imports, was enough to produce it. An unreadable path is
+ * information about the repo, reported through the trace, not an error.
+ */
+function read_text(full: string): string | null {
+  try {
+    // Checked rather than left to the catch below: reading a directory does
+    // throw, but a fifo or a device file would block instead, and a review
+    // that hangs is worse than one that crashes.
+    if (!fs.statSync(full).isFile()) {
+      return null;
+    }
+    return fs.readFileSync(full, { encoding: "utf-8" });
+  } catch {
+    // A directory, a race with a delete, a permission we lack, a device file:
+    // every one of them gets the same answer as a path that was never there.
+    return null;
+  }
+}
+
+/**
+ * Read a repo-relative path into the context list, or record why not.
+ *
+ * The path is resolved and confined to the repository. A specifier is only
+ * text, and one written inside a string literal is harvested like any other,
+ * so `../../../outside/secret.env` in a fixture was enough to read a file the
+ * review has no business seeing into the prompt — and the prompt leaves the
+ * machine. Confinement is checked here rather than at each caller so a path
+ * from a diff header gets the same treatment as one from a specifier.
+ */
+function add_context(
+  contexts: FileContext[],
+  trace: PerceptionTrace,
+  repo_root: string,
+  rel: string,
+  relevance: string,
+): void {
+  const root = path.resolve(repo_root);
+  const full = path.resolve(root, rel);
+  const inside = path.relative(root, full);
+  if (inside.startsWith("..") || path.isAbsolute(inside)) {
+    trace.outside_repo.push([rel, relevance]);
+    return;
+  }
+  const content = read_text(full);
+  if (content === null) {
+    if (fs.existsSync(full)) {
+      trace.unreadable.push([rel, relevance]);
+    }
+    return;
+  }
+  contexts.push(new FileContext(rel, content, relevance));
 }
 
 export function gather_review_context(
@@ -52,18 +113,14 @@ export function gather_review_context(
   // Step 1: Modified files (always included)
   const modified = _extract_modified_files(diff);
   for (const fpath of modified) {
-    const full = path.join(repo_root, fpath);
-    if (fs.existsSync(full)) {
-      contexts.push(new FileContext(fpath, read_text(full), "modified"));
-    }
+    add_context(contexts, trace, repo_root, fpath, "modified");
   }
 
   // Step 2: Follow imports from modified files
   for (const ctx of [...contexts]) {
     for (const imp of _find_imports(ctx.path, ctx.content)) {
-      const imp_path = path.join(repo_root, imp);
-      if (fs.existsSync(imp_path) && !modified.includes(imp)) {
-        contexts.push(new FileContext(imp, read_text(imp_path), "imported"));
+      if (!modified.includes(imp)) {
+        add_context(contexts, trace, repo_root, imp, "imported");
       }
     }
   }
@@ -71,19 +128,13 @@ export function gather_review_context(
   // Step 3: Find test files for modified modules
   for (const test of _find_test_files(modified, repo_root)) {
     if (!contexts.some((c) => c.path === test)) {
-      const full = path.join(repo_root, test);
-      if (fs.existsSync(full)) {
-        contexts.push(new FileContext(test, read_text(full), "test"));
-      }
+      add_context(contexts, trace, repo_root, test, "test");
     }
   }
 
   // Step 4: Load project configuration
   for (const cfg of ["pyproject.toml", "setup.cfg", ".flake8", "package.json", "tsconfig.json"]) {
-    const cfg_path = path.join(repo_root, cfg);
-    if (fs.existsSync(cfg_path)) {
-      contexts.push(new FileContext(cfg, read_text(cfg_path), "config"));
-    }
+    add_context(contexts, trace, repo_root, cfg, "config");
   }
 
   // Triage: sort by priority, fill greedily
@@ -155,7 +206,15 @@ function _find_imports(from_path: string, source: string): string[] {
     while ((m = re.exec(source)) !== null) {
       // .mjs specifiers compile from .mts sources; check both spellings.
       const rel = path.posix.join(dir.replaceAll("\\", "/"), m[1]);
-      imports.push(rel, rel.replace(/\.mjs$/, ".mts"), rel.replace(/\.js$/, ".ts"));
+      // Deduplicated because the spellings collapse: a specifier with no
+      // .mjs or .js suffix yields the same candidate three times, and one
+      // ending .js yields its own name twice — which read the same file into
+      // the prompt twice, against the same token budget.
+      for (const candidate of [rel, rel.replace(/\.mjs$/, ".mts"), rel.replace(/\.js$/, ".ts")]) {
+        if (!imports.includes(candidate)) {
+          imports.push(candidate);
+        }
+      }
     }
   }
   return imports;
