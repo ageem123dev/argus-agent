@@ -69,6 +69,19 @@ function read_text(full: string): string | null {
 }
 
 /**
+ * The real path, following any links. Falls back to the given path when it
+ * cannot be resolved — a path that does not exist has no canonical form, and
+ * read_text refuses it on its own.
+ */
+function canonical(p: string): string {
+  try {
+    return fs.realpathSync(p);
+  } catch {
+    return p;
+  }
+}
+
+/**
  * Read a repo-relative path into the context list, or record why not.
  *
  * The path is resolved and confined to the repository. A specifier is only
@@ -85,8 +98,14 @@ function add_context(
   rel: string,
   relevance: string,
 ): void {
-  const root = path.resolve(repo_root);
-  const full = path.resolve(root, rel);
+  // Canonicalized, not merely resolved: path.resolve is lexical, while statSync
+  // and readFileSync follow links. A link inside the repository pointing out of
+  // it — `vendor` -> an external directory — produced a candidate that looked
+  // repo-relative and read an external file anyway. Both sides are canonicalized
+  // because the root itself may sit behind a link (/var -> /private/var), which
+  // would otherwise put every candidate outside its own repository.
+  const root = canonical(path.resolve(repo_root));
+  const full = canonical(path.resolve(root, rel));
   const inside = path.relative(root, full);
   if (inside.startsWith("..") || path.isAbsolute(inside)) {
     trace.outside_repo.push([rel, relevance]);

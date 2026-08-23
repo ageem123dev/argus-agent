@@ -114,3 +114,42 @@ describe("a specifier that resolves outside the repository", () => {
     assert.deepEqual(trace.outside_repo, [["../secret.env", "modified"]]);
   });
 });
+
+describe("a link inside the repository pointing out of it", () => {
+  it("is refused — a lexical boundary check is not enough", () => {
+    // path.resolve is lexical; statSync and readFileSync follow links. A link
+    // named `vendor` inside the repo produced a candidate that looked
+    // repo-relative — `vendor/secret.env` — and read an external file anyway.
+    const base = fs.mkdtempSync(path.join(tmp_root, "symlink-"));
+    const root = path.join(base, "repo");
+    fs.mkdirSync(path.join(root, "a", "b"), { recursive: true });
+    fs.mkdirSync(path.join(base, "outside"), { recursive: true });
+    fs.writeFileSync(path.join(base, "outside", "secret.env"), "API_KEY=hunter2\n");
+
+    // Junctions need no elevation on Windows, where file symlinks do.
+    try {
+      fs.symlinkSync(
+        path.join(base, "outside"),
+        path.join(root, "vendor"),
+        process.platform === "win32" ? "junction" : "dir",
+      );
+    } catch {
+      // A platform or account that cannot make links cannot stage the escape.
+      return;
+    }
+
+    fs.writeFileSync(
+      path.join(root, "a", "b", "fixture.mts"),
+      `const planted = "import { x } from '../../vendor/secret.env'"\nexport default planted\n`,
+    );
+    const diff = "--- a/a/b/fixture.mts\n+++ b/a/b/fixture.mts\n@@ -0,0 +1 @@\n+x\n";
+
+    const [selected, trace] = gather_review_context(diff, root, 50_000);
+    assert.ok(
+      !selected.some((c) => c.content.includes("hunter2")),
+      "the link target's contents must not reach the prompt",
+    );
+    assert.deepEqual(selected.map((c) => c.path), ["a/b/fixture.mts"]);
+    assert.deepEqual(trace.outside_repo, [["vendor/secret.env", "imported"]]);
+  });
+});
