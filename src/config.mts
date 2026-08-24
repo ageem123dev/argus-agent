@@ -187,5 +187,10 @@ function prune(config: ArgusConfig): ArgusConfig {
   if (coderabbit.severities !== undefined) {
     kept.severities = coderabbit.severities;
   }
-  return { ingest: { coderabbit: kept } };
+  // Everything else is carried through rather than enumerated. Dropping the
+  // sections this function predates made them silently un-overridable: an
+  // override is the highest-precedence source, so losing one there is worse
+  // than losing it anywhere else.
+  const { ingest: _ingest, ...rest } = config;
+  return { ...rest, ingest: { coderabbit: kept } };
 }

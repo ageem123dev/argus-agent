@@ -7,8 +7,8 @@
  * only path with a written commitment about training: on the **paid** tier,
  * "Google doesn't use your prompts ... or responses to improve our products."
  * The free tier carries no such promise and says in as many words not to send
- * confidential material, so `argus` warns when the key looks unpaid and there
- * is no way for it to tell for certain: use a key from a billed project.
+ * confidential material. Argus cannot tell the tiers apart from a key, so it
+ * cannot warn you at runtime: use a key from a billed project.
  *
  * One HTTP call per review. The whole ReviewResult comes back as structured
  * output, the same contract the CLI-based provider implemented — see
@@ -37,14 +37,23 @@ export const GEMINI_ROUTING: Record<Complexity, string> = {
   [Complexity.COMPLEX]: "gemini-3.7-flash",
 };
 
-/** Thinking budget by tier: depth is bought with reasoning, not a bigger model. */
-export const GEMINI_THINKING: Record<Complexity, number> = {
-  [Complexity.SIMPLE]: 0,
-  [Complexity.MODERATE]: 8192,
-  [Complexity.COMPLEX]: 24576,
+/**
+ * Thinking level by tier: depth is bought with reasoning, not a bigger model.
+ *
+ * Gemini 3.x takes `thinkingLevel` (low | medium | high), not the token
+ * `thinkingBudget` earlier models used — a budget is silently ignored, which
+ * would have left every tier on the default level while appearing to route.
+ */
+export const GEMINI_THINKING: Record<Complexity, "low" | "medium" | "high"> = {
+  [Complexity.SIMPLE]: "low",
+  [Complexity.MODERATE]: "medium",
+  [Complexity.COMPLEX]: "high",
 };
 
 const ENDPOINT = "https://generativelanguage.googleapis.com/v1beta/models";
+
+/** Matches the CLI provider's own 5-minute print timeout. Override per call. */
+export const DEFAULT_TIMEOUT_MS = 300_000;
 
 /** Why a Gemini call failed. The distinction decides what helps next. */
 export type GeminiFailure =
@@ -147,8 +156,8 @@ export async function call_gemini(
   const key = resolve_api_key(opts);
   if (!key) {
     throw new GeminiError(
-      "no Gemini API key: set GEMINI_API_KEY (a key from a billed project — the " +
-        "free tier's terms permit training on your prompts).",
+      "no Gemini API key: set GEMINI_API_KEY or GOOGLE_API_KEY (a key from a billed " +
+        "project — the free tier's terms permit training on your prompts).",
       "no_key",
     );
   }
@@ -164,7 +173,9 @@ export async function call_gemini(
         contents: [{ role: "user", parts: [{ text: prompt }] }],
         ...extras,
       }),
-      ...(opts.timeout_ms ? { signal: AbortSignal.timeout(opts.timeout_ms) } : {}),
+      // Always set: without a deadline a stalled connection leaves the review
+      // awaiting forever, and neither the CLI nor an MCP request ever returns.
+      signal: AbortSignal.timeout(opts.timeout_ms ?? DEFAULT_TIMEOUT_MS),
     });
   } catch (e) {
     throw new GeminiError(
@@ -227,9 +238,7 @@ export class GeminiReasoning extends ArgusReasoning {
         generationConfig: {
           responseMimeType: "application/json",
           responseSchema: REVIEW_SCHEMA,
-          ...(GEMINI_THINKING[tier]
-            ? { thinkingConfig: { thinkingBudget: GEMINI_THINKING[tier] } }
-            : {}),
+          thinkingConfig: { thinkingLevel: GEMINI_THINKING[tier] },
         },
       });
 

@@ -14,6 +14,7 @@ import * as path from "node:path";
 
 import { PluginError, load_plugin, plugin_spec, resolve_plugin_path } from "../src/providers/plugin.mjs";
 import { PROVIDERS, resolve_route, route_note } from "../src/routing.mjs";
+import { load_config } from "../src/config.mjs";
 
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "argus-plugin-"));
 after(() => fs.rmSync(tmp, { recursive: true, force: true }));
@@ -94,12 +95,28 @@ describe("a plugin that cannot be used", () => {
 
 describe("where a plugin may be named", () => {
   it("prefers the environment, so the path need not be in any file", () => {
-    assert.equal(
-      plugin_spec("/repo", "from-config", { ARGUS_REASONING_PLUGIN: "from-env" } as NodeJS.ProcessEnv),
-      "from-env",
-    );
-    assert.equal(plugin_spec("/repo", "from-config", {} as NodeJS.ProcessEnv), "from-config");
+    const env = plugin_spec("/repo", "from-config", {
+      ARGUS_REASONING_PLUGIN: "from-env",
+    } as NodeJS.ProcessEnv);
+    assert.equal(env?.path, "from-env");
+    assert.equal(env?.source, "environment");
+
+    const cfg = plugin_spec("/repo", "from-config", {} as NodeJS.ProcessEnv);
+    assert.equal(cfg?.path, "from-config");
+    assert.equal(cfg?.source, "repository");
+
     assert.equal(plugin_spec("/repo", undefined, {} as NodeJS.ProcessEnv), undefined);
+  });
+
+  it("trusts only the environment — the repo under review writes its own config", () => {
+    // A checked-out repository can ship .argus/config.json naming any module.
+    // Importing it during a routine review would run that code as whoever
+    // started the review, so a repo-named plugin is never auto-selected.
+    assert.equal(
+      plugin_spec("/repo", undefined, { ARGUS_REASONING_PLUGIN: "x" } as NodeJS.ProcessEnv)?.trusted,
+      true,
+    );
+    assert.equal(plugin_spec("/repo", "./evil.mjs", {} as NodeJS.ProcessEnv)?.trusted, false);
   });
 });
 
@@ -132,5 +149,54 @@ describe("auto", () => {
     assert.match(note, /offline/);
     assert.match(note, /finds nothing/);
     assert.equal(route_note("offline", { route: "offline", auto: false }), "", "silent when asked for");
+  });
+});
+
+
+describe("a plugin whose create() fails", () => {
+  it("reports the path for a synchronous throw", async () => {
+    const file = plugin("throws", `export default { name: "x", create() { throw new Error("boom"); } };`);
+    await assert.rejects(
+      () => load_plugin(file, tmp),
+      (e: unknown) =>
+        e instanceof PluginError && e.message.includes(file) && e.message.includes("boom"),
+    );
+  });
+
+  it("reports the path for a rejected async create()", async () => {
+    const file = plugin("rejects", `export default { name: "x", async create() { throw new Error("later"); } };`);
+    await assert.rejects(
+      () => load_plugin(file, tmp),
+      (e: unknown) =>
+        e instanceof PluginError &&
+        e.message.includes(file) &&
+        e.message.includes("failed to initialise"),
+    );
+  });
+});
+
+describe("auto and an untrusted plugin", () => {
+  it("does not select a plugin the repository named for itself", () => {
+    // The security property: reviewing a hostile repo must not import its
+    // code. It stays reachable via an explicit --provider plugin.
+    const repo_named = plugin_spec("/repo", "./evil.mjs", {} as NodeJS.ProcessEnv);
+    assert.equal(
+      resolve_route("auto", { plugin: Boolean(repo_named?.trusted), gemini_key: false }).route,
+      "offline",
+    );
+    assert.equal(resolve_route("plugin", {}).route, "plugin", "still reachable when asked for");
+  });
+});
+describe("config overrides", () => {
+  it("do not lose sections prune predates", () => {
+    // prune enumerated only the ingest keys, so an override naming a plugin was
+    // dropped on the way in. An override is the highest-precedence source:
+    // losing one there is worse than losing it anywhere else.
+    const repo = fs.mkdtempSync(path.join(tmp, "cfg-"));
+    const loaded = load_config(repo, {
+      overrides: { reasoning: { plugin: "./from-override.mjs" } },
+      env: {} as NodeJS.ProcessEnv,
+    });
+    assert.equal(loaded.config.reasoning?.plugin, "./from-override.mjs");
   });
 });

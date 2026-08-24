@@ -51,8 +51,8 @@ export function route_note(requested: Provider, decision: RouteDecision): string
   }
   if (decision.route === "offline") {
     return (
-      "note: no reasoning plugin, no GEMINI_API_KEY and no ANTHROPIC_API_KEY — " +
-      "using offline reasoning, which finds nothing a model would find."
+      "note: no reasoning plugin, no GEMINI_API_KEY or GOOGLE_API_KEY, and no " +
+      "ANTHROPIC_API_KEY — using offline reasoning, which finds nothing a model would find."
     );
   }
   return `note: auto selected the ${decision.route} provider.`;

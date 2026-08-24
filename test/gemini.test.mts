@@ -216,3 +216,50 @@ describe("has_api_key", () => {
     assert.equal(has_api_key({ api_key: "" }), Boolean(process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY));
   });
 });
+
+describe("the thinking level", () => {
+  it("is sent as thinkingLevel, which is what Gemini 3.x takes", async () => {
+    // These models take a level, not the token budget earlier models used. A
+    // budget is ignored rather than rejected, so the tiers would all have run
+    // at the default depth while the routing table looked correct.
+    for (const [diff, level] of [
+      ["one line\n", "low"],
+      ["x\n".repeat(50), "medium"],
+      ["x\n".repeat(200), "high"],
+    ] as const) {
+      const { impl, seen } = stub_fetch(envelope(JSON.stringify(REVIEW)));
+      await new GeminiReasoning({ api_key: "k", fetch_impl: impl }).review(diff);
+      const cfg = seen[0].body.generationConfig;
+      assert.equal(cfg.thinkingConfig.thinkingLevel, level);
+      assert.equal(cfg.thinkingConfig.thinkingBudget, undefined, "no deprecated budget");
+    }
+  });
+});
+
+describe("the request deadline", () => {
+  it("is always set, so a stalled connection cannot hang the review", async () => {
+    // Without one the review awaits forever and neither the CLI nor an MCP
+    // request ever returns — a hang is worse than a failure.
+    let signal: AbortSignal | undefined;
+    const impl = (async (_url: any, opts: any) => {
+      signal = opts.signal;
+      return { ok: true, status: 200, text: async () => JSON.stringify(envelope("{}")) } as any;
+    }) as unknown as typeof fetch;
+
+    await new GeminiReasoning({ api_key: "k", fetch_impl: impl }).review("x\n").catch(() => {});
+    assert.ok(signal instanceof AbortSignal, "a signal must be attached by default");
+  });
+
+  it("reports a timeout as a reachability failure, not an empty review", async () => {
+    const impl = (async () => {
+      throw Object.assign(new Error("The operation was aborted due to timeout"), {
+        name: "TimeoutError",
+      });
+    }) as unknown as typeof fetch;
+
+    await assert.rejects(
+      () => new GeminiReasoning({ api_key: "k", fetch_impl: impl, timeout_ms: 1 }).review("x\n"),
+      (e: unknown) => e instanceof GeminiError && e.kind === "network",
+    );
+  });
+});

@@ -28,6 +28,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { Argus } from "./argus.mjs";
 import { ArgusReasoning, OfflineReasoning } from "./reasoning.mjs";
 import { GeminiReasoning, has_api_key } from "./providers/gemini.mjs";
+import { AnthropicClient } from "./providers/anthropic.mjs";
 import { load_plugin, plugin_spec } from "./providers/plugin.mjs";
 import { PROVIDERS, resolve_route } from "./routing.mjs";
 import { load_config } from "./config.mjs";
@@ -96,11 +97,12 @@ const INPUT = {
     .enum(PROVIDERS)
     .default("auto")
     .describe(
-      "Reasoning backend. 'auto' (the default) picks by availability: a configured " +
-        "plugin, then 'gemini' if GEMINI_API_KEY is set, then 'anthropic', then " +
-        "'offline'. 'gemini' is one API call per review. 'plugin' loads the module " +
-        "named by reasoning.plugin or ARGUS_REASONING_PLUGIN. 'offline' does no " +
-        "network I/O and finds nothing a model would find.",
+      "Reasoning backend. 'auto' (the default) picks by availability: a plugin named " +
+        "by ARGUS_REASONING_PLUGIN, then 'gemini' if GEMINI_API_KEY or GOOGLE_API_KEY " +
+        "is set, then 'anthropic', then 'offline'. 'gemini' is one API call per " +
+        "review. 'plugin' loads the module named by ARGUS_REASONING_PLUGIN or, when " +
+        "asked for explicitly, reasoning.plugin. 'offline' does no network I/O and " +
+        "finds nothing a model would find.",
     ),
   refine: z.boolean().default(true).describe("Run the generator-critic refinement loop."),
   verify_with_tools: z.boolean().default(true).describe("Run deterministic verifiers (lint)."),
@@ -215,7 +217,10 @@ server.registerTool(
       load_config(repo_root).config.reasoning?.plugin,
     );
     const { route } = resolve_route(args.provider, {
-      plugin: Boolean(configured_plugin),
+      // Only a plugin the operator named may be chosen without being asked:
+      // the repository under review can write its own .argus/config.json, and
+      // importing what that names would run its code as the reviewer.
+      plugin: Boolean(configured_plugin?.trusted),
       gemini_key: has_api_key(),
     });
     if (args.provider === "auto") {
@@ -236,8 +241,14 @@ server.registerTool(
           ],
         };
       }
+      if (!configured_plugin.trusted) {
+        console.error(
+          `argus: loading a reasoning plugin named by ${repo_root}'s own config: ` +
+            `${configured_plugin.path}`,
+        );
+      }
       try {
-        reasoning = (await load_plugin(configured_plugin, repo_root, provider_opts)).reasoning;
+        reasoning = (await load_plugin(configured_plugin.path, repo_root, provider_opts)).reasoning;
       } catch (e) {
         return {
           content: [
@@ -250,9 +261,10 @@ server.registerTool(
         route === "gemini"
           ? new GeminiReasoning(provider_opts)
           : route === "anthropic"
-            ? new ArgusReasoning()
+            ? new ArgusReasoning(new AnthropicClient(provider_opts))
             : new OfflineReasoning();
     }
+
     // Memory is on by default; Argus opens the repo's store itself.
     const argus = new Argus({ reasoning });
     let outcome;

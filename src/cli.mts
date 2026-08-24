@@ -23,6 +23,7 @@ import { ArgusMemory, HierarchicalMemory, seed_shared } from "./memory.mjs";
 import { JsonlVectorDB, default_memory_path } from "./memory_store.mjs";
 import { ArgusReasoning, OfflineReasoning } from "./reasoning.mjs";
 import { GeminiReasoning, has_api_key } from "./providers/gemini.mjs";
+import { AnthropicClient } from "./providers/anthropic.mjs";
 import { load_plugin, plugin_spec } from "./providers/plugin.mjs";
 import { PROVIDERS, resolve_route, route_note, type Provider } from "./routing.mjs";
 import type { ProviderCallTrace, ProviderOptions } from "./provider_trace.mjs";
@@ -210,7 +211,8 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
   );
   const requested = provider;
   const decided = resolve_route(provider, {
-    plugin: Boolean(configured_plugin),
+    // Only a plugin the operator named may be chosen without being asked.
+    plugin: Boolean(configured_plugin?.trusted),
     gemini_key: has_api_key(),
   });
   provider = decided.route;
@@ -224,13 +226,22 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
   if (provider === "plugin") {
     if (!configured_plugin) {
       console.error(
-        'error: --provider plugin, but no plugin is configured. Set reasoning.plugin in ' +
-          '.argus/config.json or export ARGUS_REASONING_PLUGIN=<path to a module>.',
+        "error: --provider plugin, but no plugin is configured. Set reasoning.plugin in " +
+          ".argus/config.json or export ARGUS_REASONING_PLUGIN=<path to a module>.",
       );
       return 2;
     }
+    if (!configured_plugin.trusted) {
+      // Naming the provider is the consent; saying which module ran is the
+      // part the operator could not have known, because the repository
+      // under review is what supplied the path.
+      console.error(
+        `note: loading a reasoning plugin named by ${repo_root_early}'s own config: ` +
+          `${configured_plugin.path}`,
+      );
+    }
     try {
-      const loaded = await load_plugin(configured_plugin, repo_root_early, provider_opts);
+      const loaded = await load_plugin(configured_plugin.path, repo_root_early, provider_opts);
       reasoning = loaded.reasoning;
       plugin_name = loaded.name;
     } catch (e) {
@@ -242,9 +253,10 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
       provider === "gemini"
         ? new GeminiReasoning(provider_opts)
         : provider === "anthropic"
-          ? new ArgusReasoning()
+          ? new ArgusReasoning(new AnthropicClient(provider_opts))
           : new OfflineReasoning();
   }
+
   const diff = fs.readFileSync(diff_file, "utf-8");
   const repo_root = values.repo as string;
 

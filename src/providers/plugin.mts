@@ -35,18 +35,44 @@ export class PluginError extends Error {
   }
 }
 
+/** Where a plugin path came from, which decides whether it may be trusted. */
+export type PluginSource =
+  | "environment" // ARGUS_REASONING_PLUGIN — set by whoever runs Argus
+  | "repository"; // config inside the repo under review — written by the reviewed code
+
+export interface PluginSpec {
+  path: string;
+  source: PluginSource;
+  /**
+   * Whether `auto` may select this plugin without being asked.
+   *
+   * Only the environment is. A repository under review supplies its own
+   * config, so honouring `reasoning.plugin` from it would let any checked-out
+   * repo run code as whoever started the review — `.gitignore` is not a trust
+   * boundary, and neither is a file happening to be machine-local in *your* repos.
+   */
+  trusted: boolean;
+}
+
 /**
  * Where a plugin may be named, most specific first.
  *
  * The environment variable exists so a plugin can be used without writing its
- * path into any file — the case where the whole point is to keep it local.
+ * path into any file — and, more importantly, so `auto` has a source the
+ * reviewed code cannot write to.
  */
 export function plugin_spec(
   repo_root: string,
   configured?: string,
   env: NodeJS.ProcessEnv = process.env,
-): string | undefined {
-  return env.ARGUS_REASONING_PLUGIN || configured || undefined;
+): PluginSpec | undefined {
+  if (env.ARGUS_REASONING_PLUGIN) {
+    return { path: env.ARGUS_REASONING_PLUGIN, source: "environment", trusted: true };
+  }
+  if (configured) {
+    return { path: configured, source: "repository", trusted: false };
+  }
+  return undefined;
 }
 
 /** Resolve a plugin path against the repo, so config can stay relative. */
@@ -90,7 +116,19 @@ export async function load_plugin(
     );
   }
 
-  const reasoning = await plugin.create(opts);
+  let reasoning: unknown;
+  try {
+    reasoning = await plugin.create(opts);
+  } catch (e) {
+    // Both synchronous throws and rejected promises: a plugin that fails to
+    // build is as unusable as one that fails to load, and the path is the
+    // only part of the message the user can act on.
+    throw new PluginError(
+      `reasoning plugin at ${resolved} failed to initialise: ` +
+        `${e instanceof Error ? e.message : String(e)}`,
+      spec,
+    );
+  }
   if (!reasoning || typeof (reasoning as ArgusReasoning).review !== "function") {
     throw new PluginError(
       `reasoning plugin at ${resolved} returned something without a review(diff) method.`,
