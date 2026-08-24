@@ -283,7 +283,11 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
   const review = outcome.review!;
   const p_trace = outcome.perception_trace!;
   // The route that answered, so stdout and the run record cannot disagree.
-  const answered = review.fallback?.used ?? provider;
+  // A plugin is named, not just typed: "plugin" alone would record that
+  // something external answered without recording what, which is exactly the
+  // provenance a record exists to keep.
+  const resolved_provider = plugin_name ? `plugin:${plugin_name}` : provider;
+  const answered = review.fallback?.used ?? resolved_provider;
   if (review.fallback) {
     console.error(
       `note: ${review.fallback.attempted} did not answer after ${review.fallback.attempts} ` +
