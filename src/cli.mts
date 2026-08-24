@@ -2,7 +2,7 @@
 // Argus CLI — run a full governed review on a diff.
 //
 //     argus <diff-file> --project myapp [--repo /path/to/repo]
-//           [--provider auto|antigravity|antigravity-shim|anthropic|offline]
+//           [--provider auto|gemini|anthropic|plugin|offline]
 //           [--offline] [--no-tools] [--no-refine]
 //           [--record <file>] [--no-record]
 //           [--memory <file>] [--no-memory]
@@ -22,14 +22,10 @@ import { Argus } from "./argus.mjs";
 import { ArgusMemory, HierarchicalMemory, seed_shared } from "./memory.mjs";
 import { JsonlVectorDB, default_memory_path } from "./memory_store.mjs";
 import { ArgusReasoning, OfflineReasoning } from "./reasoning.mjs";
-import {
-  AntigravityReasoning,
-  AntigravityClient,
-  AutoAntigravityReasoning,
-  resolve_route,
-  type AgyCallTrace,
-  type AgyOptions,
-} from "./providers/antigravity.mjs";
+import { GeminiReasoning, has_api_key } from "./providers/gemini.mjs";
+import { load_plugin, plugin_spec } from "./providers/plugin.mjs";
+import { PROVIDERS, resolve_route, route_note, type Provider } from "./routing.mjs";
+import type { ProviderCallTrace, ProviderOptions } from "./provider_trace.mjs";
 import {
   build_run_record,
   append_run_record,
@@ -41,8 +37,6 @@ import { load_config, parse_severities } from "./config.mjs";
 import { collect_diff, describe_diff } from "./diff.mjs";
 import { format_ingest_report, run_ingest } from "./ingest_run.mjs";
 
-const PROVIDERS = ["auto", "antigravity", "antigravity-shim", "anthropic", "offline"] as const;
-type Provider = (typeof PROVIDERS)[number];
 
 export async function main(argv: string[] = process.argv.slice(2)): Promise<number> {
   const { values, positionals } = parseArgs({
@@ -198,37 +192,59 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
     return 2;
   }
 
-  // Track every agy call: cost, and the model/conversation that produced the
-  // verdict. agy's own cli.log is overwritten per invocation, so if we don't
-  // capture this here it is unrecoverable after the next review.
-  const agy_calls: AgyCallTrace[] = [];
-  const agy_opts: AgyOptions = {
+  // Track every provider call: cost, and the model that produced the verdict.
+  // Providers that keep their own logs overwrite them per invocation, so if we
+  // do not capture this here it is unrecoverable after the next review.
+  const calls: ProviderCallTrace[] = [];
+  const provider_opts: ProviderOptions = {
     cwd: values.repo as string,
-    on_call: (t) => agy_calls.push(t),
+    on_call: (t) => calls.push(t),
   };
 
   // One shared resolver, so this and the MCP path cannot disagree about what
   // `auto` means or about which provider a record names.
+  const repo_root_early = values.repo as string;
+  const configured_plugin = plugin_spec(
+    repo_root_early,
+    load_config(repo_root_early).config.reasoning?.plugin,
+  );
   const requested = provider;
-  const decided = await resolve_route(provider);
+  const decided = resolve_route(provider, {
+    plugin: Boolean(configured_plugin),
+    gemini_key: has_api_key(),
+  });
   provider = decided.route;
-  if (requested === "auto" && provider === "offline") {
-    console.error("note: no agy binary and no ANTHROPIC_API_KEY — using offline reasoning.");
+  const note = route_note(requested, decided);
+  if (note) {
+    console.error(note);
   }
 
-  const reasoning =
-    provider === "antigravity"
-      ? decided.auto
-        // auto keeps the single-call path but degrades to the shim rather
-        // than losing the review; explicit antigravity stays one call.
-        ? new AutoAntigravityReasoning(agy_opts)
-        : new AntigravityReasoning(agy_opts)
-      : provider === "antigravity-shim"
-        ? new ArgusReasoning(new AntigravityClient(agy_opts))
+  let plugin_name: string | undefined;
+  let reasoning;
+  if (provider === "plugin") {
+    if (!configured_plugin) {
+      console.error(
+        'error: --provider plugin, but no plugin is configured. Set reasoning.plugin in ' +
+          '.argus/config.json or export ARGUS_REASONING_PLUGIN=<path to a module>.',
+      );
+      return 2;
+    }
+    try {
+      const loaded = await load_plugin(configured_plugin, repo_root_early, provider_opts);
+      reasoning = loaded.reasoning;
+      plugin_name = loaded.name;
+    } catch (e) {
+      console.error(`error: ${e instanceof Error ? e.message : String(e)}`);
+      return 2;
+    }
+  } else {
+    reasoning =
+      provider === "gemini"
+        ? new GeminiReasoning(provider_opts)
         : provider === "anthropic"
           ? new ArgusReasoning()
           : new OfflineReasoning();
-
+  }
   const diff = fs.readFileSync(diff_file, "utf-8");
   const repo_root = values.repo as string;
 
@@ -315,14 +331,14 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
     const flag = a.guardrail_blocked ? "BLOCKED" : a.error ? "ERROR" : "OK";
     console.log(`  [${flag.padEnd(7)}] ${a.tool} ${a.duration_ms.toFixed(0)}ms`);
   }
-  if (agy_calls.length) {
-    const tokens = agy_calls.reduce((a, t) => a + t.usage.total_tokens, 0);
-    console.log(`\n=== agy ===`);
-    console.log(`  ${agy_calls.length} call(s), ${tokens.toLocaleString()} total tokens`);
-    for (const t of agy_calls) {
-      console.log(`  ${t.model}  ${t.duration_seconds.toFixed(1)}s  conv=${t.conversation_id}`);
+  if (calls.length) {
+    const tokens = calls.reduce((a, t) => a + t.usage.total_tokens, 0);
+    console.log(`\n=== provider ===`);
+    console.log(`  ${calls.length} call(s), ${tokens.toLocaleString()} total tokens`);
+    for (const t of calls) {
+      const where = t.conversation_id ? `  conv=${t.conversation_id}` : "";
+      console.log(`  ${t.model}  ${t.duration_seconds.toFixed(1)}s${where}`);
     }
-    console.log(`  replay: agy --conversation ${agy_calls[0].conversation_id} -p "..."`);
   }
 
   if (!values["no-record"]) {
@@ -338,7 +354,7 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
       provider: answered,
       provider_requested: requested,
       invoked_via: "cli",
-      calls: agy_calls,
+      calls: calls,
       audit_entries: argus.governance.audit.entries as unknown as Array<Record<string, unknown>>,
     });
     const written = append_run_record(file, record);

@@ -5,3 +5,9 @@ dist/
 .DS_Store
 .vscode/
 .idea/
+
+# Local-only reasoning plugin. Driving the vendor CLI from a third-party agent
+# is not clearly permitted by their terms, so it is not published here — see
+# README, "Reasoning providers". Kept on disk, loaded via reasoning.plugin.
+src/providers/antigravity.mts
+test/agy-fallback.test.mts

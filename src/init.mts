@@ -55,16 +55,16 @@ function mcp_json(cli_ref: string): string {
  */
 function slash_command(cli_ref: string): string {
   return `---
-description: Run the Argus governed code review (Gemini via agy) on this branch's changes
+description: Run the Argus governed code review (Gemini) on this branch's changes
 argument-hint: [extra argus flags, e.g. --project my-app --no-refine]
 allowed-tools: Bash(node ${cli_ref}:*)
 ---
 
 !\`node ${cli_ref} diff --repo . --out .argus/pending.diff\`
-!\`node ${cli_ref} .argus/pending.diff --provider antigravity $ARGUMENTS\`
+!\`node ${cli_ref} .argus/pending.diff --provider auto $ARGUMENTS\`
 
-Above is Argus's review, produced by a *different* model family (Gemini, via the
-\`agy\` CLI) than the one reading this.
+Above is Argus's review, produced by a *different* model family (Gemini) than the
+one reading this.
 
 The diff covers this branch's committed work, anything uncommitted, and files git does
 not track yet -- the same body of code a reviewer running against the base branch sees.

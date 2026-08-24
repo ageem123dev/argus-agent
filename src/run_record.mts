@@ -7,8 +7,8 @@
  * appended to a JSONL file, carrying the audit entries and their hashes so the
  * chain stays verifiable after the fact.
  *
- * It also records which model actually ran and the agy conversation id, which
- * are otherwise unrecoverable — agy's own cli.log is overwritten on every
+ * It also records which model actually ran and the provider's replay handle,
+ * which are otherwise unrecoverable — a provider's own log is overwritten on
  * invocation, so by the second review the first one's log is gone.
  */
 import { execFileSync } from "node:child_process";
@@ -16,7 +16,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 
 import type { ReviewOutcome } from "./argus.mjs";
-import type { AgyCallTrace } from "./providers/antigravity.mjs";
+import type { ProviderCallTrace } from "./provider_trace.mjs";
 
 export interface RunRecord {
   /** ISO-8601, UTC. */
@@ -45,9 +45,9 @@ export interface RunRecord {
   fallback?: { attempted: string; used: string; reason: string; attempts: number };
   /** Entry point that ran the review: "cli" or "mcp". */
   invoked_via: string;
-  /** Distinct models actually used, in call order. Empty for non-agy providers. */
+  /** Distinct models actually used, in call order. */
   models: string[];
-  /** agy conversation ids — replay with `agy --conversation <id> -p "..."`. */
+  /** Provider replay handles, where the provider offers them. */
   conversation_ids: string[];
   /** Tier that selected the model. Differs from `complexity` by design. */
   routing_tier?: string;
@@ -63,6 +63,14 @@ export interface RunRecord {
   collaboration: Record<string, unknown>;
   governance: Record<string, unknown>;
   actions: Array<{ tool: string; duration_ms: number; blocked: boolean; error: boolean }>;
+  /**
+   * Per-review provider cost.
+   *
+   * Still spelled `agy` because 270 records were written under that key
+   * before the provider moved out of this repository, and ingestion joins
+   * against them. A record is an audit artefact: renaming the field would
+   * silently orphan the history it exists to preserve.
+   */
   agy: { calls: number; total_tokens: number; input_tokens: number; output_tokens: number };
   /** The hash chain itself, so the record can be re-verified independently. */
   audit: Array<{
@@ -85,7 +93,7 @@ export interface RunRecordContext {
   /** What the caller asked for; `provider` is what actually answered. */
   provider_requested?: string;
   invoked_via: string;
-  calls: AgyCallTrace[];
+  calls: ProviderCallTrace[];
   /** Present unless governance blocked before an agent was constructed. */
   audit_entries?: Array<Record<string, unknown>>;
   now?: () => Date;
@@ -95,7 +103,7 @@ export interface RunRecordContext {
 export function build_run_record(outcome: ReviewOutcome, ctx: RunRecordContext): RunRecord {
   const review = outcome.review;
   const p = outcome.perception_trace;
-  const sum = (pick: (t: AgyCallTrace) => number) => ctx.calls.reduce((a, t) => a + pick(t), 0);
+  const sum = (pick: (t: ProviderCallTrace) => number) => ctx.calls.reduce((a, t) => a + pick(t), 0);
 
   return {
     timestamp: (ctx.now?.() ?? new Date()).toISOString(),

@@ -27,14 +27,11 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 
 import { Argus } from "./argus.mjs";
 import { ArgusReasoning, OfflineReasoning } from "./reasoning.mjs";
-import {
-  AntigravityReasoning,
-  AntigravityClient,
-  AutoAntigravityReasoning,
-  resolve_route,
-  type AgyCallTrace,
-  type AgyOptions,
-} from "./providers/antigravity.mjs";
+import { GeminiReasoning, has_api_key } from "./providers/gemini.mjs";
+import { load_plugin, plugin_spec } from "./providers/plugin.mjs";
+import { PROVIDERS, resolve_route } from "./routing.mjs";
+import { load_config } from "./config.mjs";
+import type { ProviderCallTrace, ProviderOptions } from "./provider_trace.mjs";
 import {
   build_run_record,
   append_run_record,
@@ -44,7 +41,6 @@ import {
 import { format_ingest_report, run_ingest } from "./ingest_run.mjs";
 import { collect_diff, describe_diff } from "./diff.mjs";
 
-const PROVIDERS = ["auto", "antigravity", "antigravity-shim", "anthropic", "offline"] as const;
 
 /** Collect a diff from git, without a shell. */
 function git_diff(repo_root: string, range: string): Promise<string> {
@@ -100,11 +96,11 @@ const INPUT = {
     .enum(PROVIDERS)
     .default("auto")
     .describe(
-      "Reasoning backend. 'auto' (the default) picks by availability and degrades at " +
-        "runtime: one agy call per review, retried once if agy returns nothing, then the " +
-        "shim rather than losing the review. 'antigravity' is exactly one call and fails " +
-        "hard. 'antigravity-shim' drives classify/CoT/verify itself at ~20x the calls. " +
-        "'offline' does no network I/O.",
+      "Reasoning backend. 'auto' (the default) picks by availability: a configured " +
+        "plugin, then 'gemini' if GEMINI_API_KEY is set, then 'anthropic', then " +
+        "'offline'. 'gemini' is one API call per review. 'plugin' loads the module " +
+        "named by reasoning.plugin or ARGUS_REASONING_PLUGIN. 'offline' does no " +
+        "network I/O and finds nothing a model would find.",
     ),
   refine: z.boolean().default(true).describe("Run the generator-critic refinement loop."),
   verify_with_tools: z.boolean().default(true).describe("Run deterministic verifiers (lint)."),
@@ -129,7 +125,7 @@ const OUTPUT = {
   routing_tier: z.string().optional(),
   /** Models that actually produced this review. */
   models: z.array(z.string()),
-  /** Replay handles: `agy --conversation <id> -p "..."`. */
+  /** Replay handles, for providers that expose one. Empty otherwise. */
   conversation_ids: z.array(z.string()),
   confidence: z.number(),
   blocked: z.boolean(),
@@ -143,8 +139,8 @@ const OUTPUT = {
   reflection_converged: z.boolean().optional(),
   audit_entries: z.number(),
   audit_chain_ok: z.boolean(),
-  agy_calls: z.number(),
-  agy_tokens: z.number(),
+  calls: z.number(),
+  provider_tokens: z.number(),
   record_path: z.string().optional(),
 };
 
@@ -157,7 +153,7 @@ server.registerTool(
     description:
       "Run Argus, an autonomous code-review agent, over a diff. Argus gathers repo context " +
       "under a token budget, reasons about the change, critiques its own verdict, and returns " +
-      "findings with an audit trail. By default it reasons via Google's agy CLI (Gemini), so " +
+      "findings with an audit trail. By default it reasons via the Gemini API, so " +
       "it is a genuine second opinion from a different model family — verify its findings " +
       "against the real files before acting on them.",
     inputSchema: INPUT,
@@ -209,27 +205,54 @@ server.registerTool(
       };
     }
 
-    const agy_calls: AgyCallTrace[] = [];
-    const agy_opts: AgyOptions = { cwd: repo_root, on_call: (t) => agy_calls.push(t) };
+    const calls: ProviderCallTrace[] = [];
+    const provider_opts: ProviderOptions = { cwd: repo_root, on_call: (t) => calls.push(t) };
 
     // One shared resolver, so the CLI and this path cannot disagree about what
     // `auto` means or about which provider a record names.
-    const { route, auto } = await resolve_route(args.provider);
-    if (args.provider === "auto" && route !== "antigravity") {
-      console.error(`argus: no agy binary — using the ${route} provider.`);
+    const configured_plugin = plugin_spec(
+      repo_root,
+      load_config(repo_root).config.reasoning?.plugin,
+    );
+    const { route } = resolve_route(args.provider, {
+      plugin: Boolean(configured_plugin),
+      gemini_key: has_api_key(),
+    });
+    if (args.provider === "auto") {
+      console.error(`argus: auto selected the ${route} provider.`);
     }
 
-    const reasoning =
-      route === "antigravity"
-        ? auto
-          ? new AutoAntigravityReasoning(agy_opts)
-          : new AntigravityReasoning(agy_opts)
-        : route === "antigravity-shim"
-          ? new ArgusReasoning(new AntigravityClient(agy_opts))
+    let reasoning;
+    if (route === "plugin") {
+      if (!configured_plugin) {
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text:
+                "error: provider 'plugin' requested but none configured. Set " +
+                "reasoning.plugin in .argus/config.json or export ARGUS_REASONING_PLUGIN.",
+            },
+          ],
+        };
+      }
+      try {
+        reasoning = (await load_plugin(configured_plugin, repo_root, provider_opts)).reasoning;
+      } catch (e) {
+        return {
+          content: [
+            { type: "text" as const, text: `error: ${e instanceof Error ? e.message : String(e)}` },
+          ],
+        };
+      }
+    } else {
+      reasoning =
+        route === "gemini"
+          ? new GeminiReasoning(provider_opts)
           : route === "anthropic"
             ? new ArgusReasoning()
             : new OfflineReasoning();
-
+    }
     // Memory is on by default; Argus opens the repo's store itself.
     const argus = new Argus({ reasoning });
     let outcome;
@@ -280,7 +303,7 @@ server.registerTool(
           provider: review.fallback?.used ?? route,
           provider_requested: args.provider,
           invoked_via: "mcp",
-          calls: agy_calls,
+          calls: calls,
           audit_entries: argus.governance.audit.entries as unknown as Array<
             Record<string, unknown>
           >,
@@ -294,13 +317,13 @@ server.registerTool(
       }
     }
 
-    const agy_tokens = agy_calls.reduce((a, t) => a + t.usage.total_tokens, 0);
+    const provider_tokens = calls.reduce((a, t) => a + t.usage.total_tokens, 0);
     const structured = {
       verdict: review.verdict,
       complexity: review.complexity,
       routing_tier: review.routing_tier,
-      models: [...new Set(agy_calls.map((t) => t.model))],
-      conversation_ids: agy_calls.map((t) => t.conversation_id).filter(Boolean),
+      models: [...new Set(calls.map((t) => t.model))],
+      conversation_ids: calls.map((t) => t.conversation_id).filter(Boolean),
       confidence: review.confidence,
       blocked: false,
       files_discovered: p.files_discovered,
@@ -312,8 +335,8 @@ server.registerTool(
       reflection_converged: r.converged as boolean | undefined,
       audit_entries: (g.audit_entries as number) ?? 0,
       audit_chain_ok: (g.audit_chain_ok as boolean) ?? false,
-      agy_calls: agy_calls.length,
-      agy_tokens,
+      calls: calls.length,
+      provider_tokens,
       record_path,
     };
 
@@ -332,11 +355,10 @@ server.registerTool(
       `reflection: ${JSON.stringify(outcome.reflection_meta)}`,
       `governance: audit_entries=${structured.audit_entries}, chain_ok=${structured.audit_chain_ok}`,
     ];
-    if (agy_calls.length) {
+    if (calls.length) {
       lines.push(
         `model: ${structured.models.join(", ")}`,
-        `agy: ${agy_calls.length} call(s), ${agy_tokens.toLocaleString()} tokens`,
-        `replay: agy --conversation ${agy_calls[0].conversation_id} -p "..."`,
+        `provider: ${calls.length} call(s), ${provider_tokens.toLocaleString()} tokens`,
       );
     }
     if (record_path) {

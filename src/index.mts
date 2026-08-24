@@ -122,16 +122,35 @@ export {
   ReasoningStep,
 } from "./reasoning.mjs";
 export {
-  AntigravityReasoning,
-  AntigravityClient,
-  AgyError,
-  agy_available,
-  run_agy,
-  resolve_agy_bin,
-  AGY_ROUTING,
-  CLAUDE_TO_AGY,
-} from "./providers/antigravity.mjs";
-export type { AgyEnvelope, AgyOptions } from "./providers/antigravity.mjs";
+  GeminiReasoning,
+  GeminiClient,
+  GeminiError,
+  call_gemini,
+  has_api_key,
+  resolve_api_key,
+  GEMINI_ROUTING,
+  CLAUDE_TO_GEMINI,
+} from "./providers/gemini.mjs";
+export {
+  load_plugin,
+  plugin_spec,
+  PluginError,
+  type ReasoningPlugin,
+} from "./providers/plugin.mjs";
+export { PROVIDERS, resolve_route, route_note, type Provider } from "./routing.mjs";
+export {
+  REVIEW_PROMPT,
+  REVIEW_SCHEMA,
+  EmptyReviewError,
+  interpret_review,
+  render_verdict,
+  tier_for_size,
+} from "./review_schema.mjs";
+export type {
+  ProviderCallTrace,
+  ProviderOptions,
+  ProviderUsage,
+} from "./provider_trace.mjs";
 export {
   ArgusAction,
   ActionTrace,

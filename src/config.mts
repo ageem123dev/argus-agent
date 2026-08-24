@@ -44,6 +44,18 @@ export interface ArgusConfig {
    * is the right default for a repo that stands alone.
    */
   memory?: { shared?: string };
+  reasoning?: {
+    /**
+     * A reasoning provider loaded from outside this repository.
+     *
+     * A path to a module exporting { name, create }. Relative paths resolve
+     * against the repo root. Belongs in `.argus/config.json` rather than the
+     * committed file: a plugin is by definition local to the machine that
+     * has it. `ARGUS_REASONING_PLUGIN` overrides this, for the case where the
+     * whole point is to keep the path out of any file.
+     */
+    plugin?: string;
+  };
   ingest?: {
     coderabbit?: IngestSourceConfig;
   };

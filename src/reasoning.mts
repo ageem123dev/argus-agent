@@ -318,7 +318,7 @@ export class OfflineReasoning extends ArgusReasoning {
     return new ReviewResult(
       "[offline] Review summary:\n" +
         ` - ${lines} changed lines, complexity=${tier}\n` +
-        " - severity=info  Offline mode; set ANTHROPIC_API_KEY for live reasoning.\n",
+        " - severity=info  Offline mode; set GEMINI_API_KEY for live reasoning.\n",
       [],
       0.7,
       tier,
