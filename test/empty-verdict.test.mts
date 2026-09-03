@@ -115,3 +115,68 @@ describe("the run record", () => {
     assert.equal(record_for("   \n ").ok, false, "whitespace is not a review");
   });
 });
+
+describe("a response whose first block is not the answer", () => {
+  it("is read as a review, not rejected as empty", async () => {
+    // The COMPLEX tier sends thinking: {type: "adaptive"}, and the SDK then
+    // returns a thinking block ahead of the text. Reading content[0] found no
+    // text there and threw EmptyReviewError over a perfectly good review — the
+    // guard rejecting exactly the tier it was meant to protect.
+    const client = {
+      messages: {
+        create: async () => ({
+          content: [
+            { type: "thinking", thinking: "weighing the diff" },
+            { type: "text", text: "One high-severity issue in auth." },
+          ],
+        }),
+      },
+    };
+    const result = await new ArgusReasoning(client).review("x\n".repeat(400));
+    assert.match(result.verdict, /One high-severity issue in auth\./);
+  });
+
+  it("still refuses when every block is a thinking block", async () => {
+    const client = {
+      messages: {
+        create: async () => ({ content: [{ type: "thinking", thinking: "hmm" }] }),
+      },
+    };
+    await assert.rejects(
+      () => new ArgusReasoning(client).review("x\n".repeat(400)),
+      (e: unknown) => e instanceof EmptyReviewError,
+      "thinking alone is not a review",
+    );
+  });
+
+  it("joins several text blocks rather than taking the first", async () => {
+    const client = {
+      messages: {
+        create: async () => ({
+          content: [
+            { type: "text", text: "First half. " },
+            { type: "text", text: "Second half." },
+          ],
+        }),
+      },
+    };
+    const result = await new ArgusReasoning(client).review("x\n".repeat(400));
+    assert.equal(result.verdict, "First half. Second half.");
+  });
+});
+
+describe("the finding counter", () => {
+  it("counts whole list items, not any mention of the format", () => {
+    // A clean review that explains the format was counted as having findings,
+    // and could then be rejected when tool evidence said the tests passed.
+    assert.equal(count_findings("All clean. Use **[high]** markers when reporting."), 0);
+    assert.equal(count_findings("- **[high]** a.mts:4 — real finding"), 1);
+  });
+
+  it("falls back to `severity:`, not the bare word the prompt itself uses", () => {
+    // "List up to 3 issues, severity-tagged" is in the prompt, so a verdict
+    // echoing it would otherwise count as a finding.
+    assert.equal(count_findings("List up to 3 issues, severity-tagged. Nothing found."), 0);
+    assert.equal(count_findings("One issue, severity: high in a.mts"), 1);
+  });
+});

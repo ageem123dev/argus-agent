@@ -1,4 +1,22 @@
 /**
+ * The text of a response, ignoring blocks that are not text.
+ *
+ * Adaptive thinking puts a `thinking` block before the answer, so the first
+ * block is not the review: reading content[0] rejected a perfectly good one as
+ * empty. Blocks from the duck-typed providers carry no `type` at all, so an
+ * untyped block with text counts as text.
+ */
+export function response_text(response: {
+  content?: Array<{ type?: string; text?: string }>;
+}): string {
+  return (response?.content ?? [])
+    .filter((b) => b && (b.type === undefined || b.type === "text"))
+    .map((b) => b.text ?? "")
+    .join("")
+    .trim();
+}
+
+/**
  * Reasoning — complexity-routed review generation.
  *
  * Three integrated mechanisms:
@@ -54,7 +72,7 @@ export async function classify_complexity(client: any, query: string): Promise<C
     max_tokens: 200,
     messages: [{ role: "user", content: `${CLASSIFY_PROMPT}\nQuery: ${query}` }],
   });
-  const first_word = response.content[0].text.split(/\s+/)[0];
+  const first_word = response_text(response).split(/\s+/)[0];
   const candidate = first_word.toLowerCase().replace(/[.:,]+$/, "");
   if ((Object.values(Complexity) as string[]).includes(candidate)) {
     return candidate as Complexity;
@@ -122,7 +140,7 @@ export async function reason_with_cot(client: any, question: string): Promise<Ch
     system: COT_SYSTEM_PROMPT,
     messages: [{ role: "user", content: question }],
   });
-  return parse_chain(response.content[0].text);
+  return parse_chain(response_text(response));
 }
 
 export async function verify_chain(
@@ -149,8 +167,9 @@ export async function verify_chain(
         },
       ],
     });
-    if (response.content[0].text.toUpperCase().includes("INVALID")) {
-      issues.push({ step: step.step_number, issue: response.content[0].text });
+    const verdict = response_text(response);
+    if (verdict.toUpperCase().includes("INVALID")) {
+      issues.push({ step: step.step_number, issue: verdict });
     }
   }
   return issues;
@@ -305,7 +324,7 @@ ${diff.slice(0, 500)}`,
         },
       ],
     });
-    return this.built(response.content[0]?.text, [], 0.8, "simple");
+    return this.built(response_text(response), [], 0.8, "simple");
   }
 
   /** CoT review with weak-step verification. */
@@ -344,7 +363,7 @@ ${diff.slice(0, 500)}`,
       kwargs.thinking = cfg.thinking;
     }
     const response = await (await this.client()).messages.create(kwargs);
-    return this.built(response.content[0]?.text, [], 0.9, "complex");
+    return this.built(response_text(response), [], 0.9, "complex");
   }
 }
 

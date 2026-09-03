@@ -247,7 +247,9 @@ export class ReflectionTrace {
   notes: string[] = [];
 }
 
-/** Argus's self-improvement loop: critic loop + skills + experience. */
+/** The severities render_verdict emits, lower-cased. */
+const SEVERITIES = ["critical", "high", "medium", "low", "info"];
+
 /**
  * Findings in a rendered verdict.
  *
@@ -258,12 +260,26 @@ export class ReflectionTrace {
  * approve everything at 1.0 — including reviews with no text at all.
  */
 export function count_findings(review_text: string): number {
-  // The marker structured providers render: `- **[high]** path — issue`.
-  const marker = review_text.split("**[").length - 1;
-  // The prose spelling the Anthropic path tends to produce.
-  return marker || review_text.toLowerCase().split("severity").length - 1;
+  // Whole list items only. Counting `**[` anywhere also counted prose that
+  // merely mentions the format — and a clean review saying so would then be
+  // scored as having findings, and rejected when tool evidence said "passes".
+  let marker = 0;
+  for (const line of review_text.split("\n")) {
+    const rest = line.trimStart().toLowerCase();
+    if (!rest.startsWith("- **[")) {
+      continue;
+    }
+    const after = rest.slice("- **[".length);
+    if (SEVERITIES.some((s) => after.startsWith(s + "]**"))) {
+      marker += 1;
+    }
+  }
+  // The prose spelling the Anthropic path produces. `severity:` rather than
+  // the bare word, which also appears in the prompt’s own "severity-tagged".
+  return marker || review_text.toLowerCase().split("severity:").length - 1;
 }
 
+/** Argus's self-improvement loop: critic loop + skills + experience. */
 export class ArgusReflection {
   skills = new SkillLibrary();
   experience = new ExperienceReplay();
