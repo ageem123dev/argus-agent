@@ -248,6 +248,22 @@ export class ReflectionTrace {
 }
 
 /** Argus's self-improvement loop: critic loop + skills + experience. */
+/**
+ * Findings in a rendered verdict.
+ *
+ * Counted from the shapes verdicts are actually written in, not from the word
+ * "severity": structured providers render `- **[high]** path — issue`, and over
+ * 103 real runs only 2 verdicts contained that word while 22 used the marker.
+ * Counting the word scored every review as findingless, which made the critic
+ * approve everything at 1.0 — including reviews with no text at all.
+ */
+export function count_findings(review_text: string): number {
+  // The marker structured providers render: `- **[high]** path — issue`.
+  const marker = review_text.split("**[").length - 1;
+  // The prose spelling the Anthropic path tends to produce.
+  return marker || review_text.toLowerCase().split("severity").length - 1;
+}
+
 export class ArgusReflection {
   skills = new SkillLibrary();
   experience = new ExperienceReplay();
@@ -259,7 +275,14 @@ export class ArgusReflection {
    * that cannot be reproduced.
    */
   critique_review(review_text: string, tool_evidence = ""): Critique {
-    const findings = review_text.split("severity").length - 1;
+    // Silence is not quality. The score below is the fraction of findings that
+    // survive scrutiny, and with no findings there is nothing to disbelieve — so
+    // an empty verdict scored a perfect 1.0 and was approved. A review with no
+    // text is the one thing the critic must never bless.
+    if (!review_text.trim()) {
+      return new Critique(0.0, false, "The review is empty — no verdict was produced.");
+    }
+    const findings = count_findings(review_text);
     const false_positive_signal =
       tool_evidence.toLowerCase().includes("passes") &&
       !tool_evidence.toLowerCase().includes("fails") &&

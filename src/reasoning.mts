@@ -180,6 +180,26 @@ export function deepest(tier: Complexity, floor?: Complexity): Complexity {
   return floor && TIER_DEPTH[floor] > TIER_DEPTH[tier] ? floor : tier;
 }
 
+/**
+ * A provider answered and said nothing.
+ *
+ * Deliberately an error rather than a review. An empty verdict is
+ * indistinguishable from a clean one in every field except its length: it
+ * gets recorded as a real run, reads as a passing review, and scores as a
+ * total miss against any second reviewer. Defined here rather than in
+ * review_schema so both live in the module the other one imports.
+ */
+export class EmptyReviewError extends Error {
+  constructor(
+    message: string,
+    /** Attempts made before giving up, filled in by whatever retries. */
+    public attempts = 1,
+  ) {
+    super(message);
+    this.name = "EmptyReviewError";
+  }
+}
+
 export class ReviewResult {
   constructor(
     public verdict: string,
@@ -247,6 +267,31 @@ ${diff.slice(0, 500)}`,
     return this._deep_review(diff);
   }
 
+  /**
+   * Build a review, or refuse to call silence one.
+   *
+   * Every path here returned whatever text came back, unchecked. A provider
+   * that answers with nothing then produced a verdict of "" carrying a
+   * hardcoded confidence — indistinguishable from a clean review in every
+   * field except its length, recorded as a real run, and scored later as a
+   * total miss. The structured-output providers already refuse this; the
+   * multi-step path is where it slipped through.
+   */
+  private built(
+    text: string | undefined,
+    steps: unknown[],
+    confidence: number,
+    complexity: string,
+  ): ReviewResult {
+    if (!text?.trim()) {
+      throw new EmptyReviewError(
+        `the ${complexity} reasoning path produced no review text. This is a failed ` +
+          `review, not a clean one.`,
+      );
+    }
+    return new ReviewResult(text, steps, confidence, complexity);
+  }
+
   /** One pass, cheap model, structured output. Used when classifier says SIMPLE. */
   private async _quick_review(diff: string): Promise<ReviewResult> {
     const cfg = ROUTING_TABLE[Complexity.SIMPLE];
@@ -260,7 +305,7 @@ ${diff.slice(0, 500)}`,
         },
       ],
     });
-    return new ReviewResult(response.content[0].text, [], 0.8, "simple");
+    return this.built(response.content[0]?.text, [], 0.8, "simple");
   }
 
   /** CoT review with weak-step verification. */
@@ -279,7 +324,7 @@ ${diff.slice(0, 500)}`,
     const confidence = chain.steps.length
       ? Math.min(...chain.steps.map((s) => s.confidence))
       : 0.5;
-    return new ReviewResult(chain.final_answer, chain.steps, confidence, complexity);
+    return this.built(chain.final_answer, chain.steps, confidence, complexity);
   }
 
   /** COMPLEX path: use the highest reasoning tier from ROUTING_TABLE. */
@@ -299,7 +344,7 @@ ${diff.slice(0, 500)}`,
       kwargs.thinking = cfg.thinking;
     }
     const response = await (await this.client()).messages.create(kwargs);
-    return new ReviewResult(response.content[0].text, [], 0.9, "complex");
+    return this.built(response.content[0]?.text, [], 0.9, "complex");
   }
 }
 
