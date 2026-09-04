@@ -247,6 +247,38 @@ export class ReflectionTrace {
   notes: string[] = [];
 }
 
+/** The severities render_verdict emits, lower-cased. */
+const SEVERITIES = ["critical", "high", "medium", "low", "info"];
+
+/**
+ * Findings in a rendered verdict.
+ *
+ * Counted from the shapes verdicts are actually written in, not from the word
+ * "severity": structured providers render `- **[high]** path — issue`, and over
+ * 103 real runs only 2 verdicts contained that word while 22 used the marker.
+ * Counting the word scored every review as findingless, which made the critic
+ * approve everything at 1.0 — including reviews with no text at all.
+ */
+export function count_findings(review_text: string): number {
+  // Whole list items only. Counting `**[` anywhere also counted prose that
+  // merely mentions the format — and a clean review saying so would then be
+  // scored as having findings, and rejected when tool evidence said "passes".
+  let marker = 0;
+  for (const line of review_text.split("\n")) {
+    const rest = line.trimStart().toLowerCase();
+    if (!rest.startsWith("- **[")) {
+      continue;
+    }
+    const after = rest.slice("- **[".length);
+    if (SEVERITIES.some((s) => after.startsWith(s + "]**"))) {
+      marker += 1;
+    }
+  }
+  // The prose spelling the Anthropic path produces. `severity:` rather than
+  // the bare word, which also appears in the prompt’s own "severity-tagged".
+  return marker || review_text.toLowerCase().split("severity:").length - 1;
+}
+
 /** Argus's self-improvement loop: critic loop + skills + experience. */
 export class ArgusReflection {
   skills = new SkillLibrary();
@@ -259,7 +291,14 @@ export class ArgusReflection {
    * that cannot be reproduced.
    */
   critique_review(review_text: string, tool_evidence = ""): Critique {
-    const findings = review_text.split("severity").length - 1;
+    // Silence is not quality. The score below is the fraction of findings that
+    // survive scrutiny, and with no findings there is nothing to disbelieve — so
+    // an empty verdict scored a perfect 1.0 and was approved. A review with no
+    // text is the one thing the critic must never bless.
+    if (!review_text.trim()) {
+      return new Critique(0.0, false, "The review is empty — no verdict was produced.");
+    }
+    const findings = count_findings(review_text);
     const false_positive_signal =
       tool_evidence.toLowerCase().includes("passes") &&
       !tool_evidence.toLowerCase().includes("fails") &&

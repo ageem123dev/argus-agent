@@ -15,7 +15,7 @@
  * ingestion scores Argus against CodeRabbit on what that parse returns. Change
  * the rendering here and findings stop being counted there.
  */
-import { Complexity, ReviewResult } from "./reasoning.mjs";
+import { Complexity, EmptyReviewError, ReviewResult } from "./reasoning.mjs";
 
 const TIERS = new Set<string>(Object.values(Complexity));
 
@@ -148,25 +148,10 @@ export function render_verdict(r: StructuredReview): string {
   return parts.join("\n");
 }
 
-/**
- * A provider answered successfully and said nothing.
- *
- * Deliberately not swallowed. A provider can report success having produced
- * neither structured output nor prose, and returning that as a review is worse
- * than failing: an empty verdict is indistinguishable from a clean diff, gets
- * recorded as a real run, and then scores as a total miss against any second
- * reviewer.
- */
-export class EmptyReviewError extends Error {
-  constructor(
-    message: string,
-    /** Attempts made before giving up, filled in by whatever retries. */
-    public attempts = 1,
-  ) {
-    super(message);
-    this.name = "EmptyReviewError";
-  }
-}
+// EmptyReviewError lives in reasoning.mts — this module already imports that
+// one, and the error is thrown from both. Re-exported so importers of the
+// review contract need not know where it is defined.
+export { EmptyReviewError } from "./reasoning.mjs";
 
 /**
  * Turn a provider's answer into a review, or say precisely why it is not one.

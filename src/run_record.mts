@@ -54,6 +54,17 @@ export interface RunRecord {
   /** The reasoner's own assessment of the change. */
   complexity: string;
   confidence: number;
+  /**
+   * Whether a review actually happened.
+   *
+   * The one field that answers that question. Everything else measures
+   * something adjacent: audit_chain_ok is hash integrity, selectivity is
+   * budget fit, and the reflection score was 1.0 on all 103 records written
+   * before this field existed — including the three where no verdict was
+   * produced at all. A caller gating on freshness needs a signal that can
+   * say no; counting appended records cannot.
+   */
+  ok: boolean;
   verdict: string;
   blocked_reason?: string;
   perception: { discovered: number; selected: number; selectivity: number };
@@ -119,6 +130,7 @@ export function build_run_record(outcome: ReviewOutcome, ctx: RunRecordContext):
     routing_tier: review?.routing_tier,
     complexity: review?.complexity ?? "",
     confidence: review?.confidence ?? 0,
+    ok: Boolean(review?.verdict?.trim()),
     verdict: review?.verdict ?? "",
     blocked_reason: outcome.blocked_reason ?? undefined,
     perception: {

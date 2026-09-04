@@ -314,6 +314,10 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
         "not a clean one. Re-run before relying on it or ingesting against it.",
     );
   }
+  // Recorded below either way — a failed review belongs in the audit trail —
+  // but the exit code has to agree with the warning just printed. Distinct
+  // from 1, which means the review could not start.
+  const empty_verdict = !review.verdict.trim();
   // routing_tier (what picked the model) is reported separately from complexity
   // (what the model thought of the change) — they routinely disagree.
   const tier = review.routing_tier ? `, tier=${review.routing_tier}` : "";
@@ -380,7 +384,7 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
         : `\nnote: could not write run record (${written.error})`,
     );
   }
-  return 0;
+  return empty_verdict ? 2 : 0;
 }
 
 // Run when invoked directly (`node dist/cli.mjs ...` or via the `argus` bin).

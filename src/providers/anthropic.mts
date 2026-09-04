@@ -19,7 +19,7 @@ interface AnthropicUsage {
 
 interface AnthropicMessage {
   model?: string;
-  content: Array<{ text?: string }>;
+  content: Array<{ type?: string; text?: string }>;
   usage?: AnthropicUsage;
 }
 
@@ -56,7 +56,7 @@ export class AnthropicClient {
       system?: string;
       messages: Array<{ role: string; content: string }>;
       thinking?: unknown;
-    }): Promise<{ content: Array<{ text: string }> }> => {
+    }): Promise<{ content: Array<{ type?: string; text: string }> }> => {
       const started = Date.now();
       const response = await (await this.client()).messages.create(req);
       const usage = response.usage ?? {};
@@ -77,7 +77,14 @@ export class AnthropicClient {
         },
       } satisfies ProviderCallTrace);
 
-      return { content: (response.content ?? []).map((c) => ({ text: c.text ?? "" })) };
+      // Type preserved: a thinking block must stay distinguishable from the
+      // answer, or whatever reads the response cannot tell them apart.
+      return {
+        content: (response.content ?? []).map((c) => ({
+          type: c.type,
+          text: c.text ?? "",
+        })),
+      };
     },
   };
 }
