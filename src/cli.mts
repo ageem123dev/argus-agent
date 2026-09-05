@@ -281,9 +281,19 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
       remember: !values["no-memory"],
     });
   } catch (e) {
-    console.error(`error: reasoning failed via provider "${provider}": ${
-      e instanceof Error ? e.message : String(e)
-    }`);
+    console.error(
+      `error: reasoning failed via provider "${provider}": ` +
+        `${e instanceof Error ? e.message : String(e)}`,
+    );
+    // The models the provider actually called, which the routing slug in the
+    // message above does not name: a plugin maps its own slugs, so a failure
+    // can name claude-sonnet-4-6 while the request went to something else
+    // entirely. When one model starts returning nothing, this line is what
+    // says which one.
+    const attempted = [...new Set(calls.map((c) => c.model))].filter(Boolean);
+    if (attempted.length) {
+      console.error(`  models actually called: ${attempted.join(", ")}`);
+    }
     return 1;
   }
 
