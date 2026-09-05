@@ -173,3 +173,67 @@ describe("the default ladder", () => {
     );
   });
 });
+
+describe("the complexity floor survives the ladder", () => {
+  it("forwards a floor the caller established", async () => {
+    const seen: Array<string | undefined> = [];
+    const reasoning = new ArgusReasoning(null);
+    reasoning.review = async (_d: string, floor?: string) => {
+      seen.push(floor);
+      return new ReviewResult("A review.", [], 0.9, "complex");
+    };
+    await new ResilientReasoning([{ label: "a", reasoning }], fake_sleep()).review(
+      AUGMENTED,
+      "complex" as never,
+    );
+    assert.deepEqual(seen, ["complex"], "a floor the caller set must reach the rung");
+  });
+
+  it("floors a lightened rung by the original change, not the smaller text", async () => {
+    // The diff-only rung sends less text, and anything routing by size reads
+    // smaller as simpler — so without this the deepest review gets answered on
+    // the cheapest setting, degraded twice over.
+    const seen: Array<string | undefined> = [];
+    const reasoning = new ArgusReasoning(null);
+    let n = 0;
+    reasoning.review = async (_d: string, floor?: string) => {
+      seen.push(floor);
+      if (++n === 1) throw new EmptyReviewError("empty");
+      return new ReviewResult("Recovered.", [], 0.9, "complex");
+    };
+    // The bare diff routes MODERATE (50 lines); the augmented request routes
+    // COMPLEX (250). Flooring by the lightened text would hand the deepest
+    // review a moderate tier, which is the whole failure being pinned.
+    const bare = String.fromCharCode(120,10).repeat(50);
+    const big = bare + CONTEXT_MARKER + String.fromCharCode(121,10).repeat(200);
+    await new ResilientReasoning(
+      default_ladder({ label: "p", reasoning }),
+      fake_sleep(),
+    ).review(big);
+
+    assert.equal(seen[1], "complex", "the lightened rung keeps the original change's tier");
+  });
+});
+
+describe("exhausting the ladder reports the right kind of failure", () => {
+  it("is an EmptyReviewError when a rung actually answered with nothing", async () => {
+    const ladder = new ResilientReasoning(
+      [rung("a", new EmptyReviewError("silent"))],
+      fake_sleep(),
+    );
+    await assert.rejects(() => ladder.review(AUGMENTED), (e: unknown) => e instanceof EmptyReviewError);
+  });
+
+  it("is not, when every rung failed to run at all", async () => {
+    // A missing binary is not silence. Callers separate the two by exit code,
+    // so labelling one as the other collapses the distinction.
+    const ladder = new ResilientReasoning(
+      [rung("a", new Error("binary missing")), rung("b", new Error("still missing"))],
+      fake_sleep(),
+    );
+    await assert.rejects(
+      () => ladder.review(AUGMENTED),
+      (e: unknown) => e instanceof Error && !(e instanceof EmptyReviewError),
+    );
+  });
+});

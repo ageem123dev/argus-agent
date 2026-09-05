@@ -228,6 +228,7 @@ server.registerTool(
       console.error(`argus: auto selected the ${route} provider.`);
     }
 
+    let plugin_label: string | undefined;
     let reasoning;
     if (route === "plugin") {
       if (!configured_plugin) {
@@ -249,7 +250,11 @@ server.registerTool(
         );
       }
       try {
-        reasoning = (await load_plugin(configured_plugin.path, repo_root, provider_opts)).reasoning;
+        const loaded = await load_plugin(configured_plugin.path, repo_root, provider_opts);
+        reasoning = loaded.reasoning;
+        // Named, not just typed: fallback metadata has to identify which
+        // plugin answered, exactly as the CLI records plugin:<name>.
+        plugin_label = `plugin:${loaded.name}`;
       } catch (e) {
         return {
           content: [
@@ -273,7 +278,7 @@ server.registerTool(
     // lost one. If every rung fails it still fails — never a fake clean run.
     reasoning = new ResilientReasoning(
       default_ladder(
-        { label: route, reasoning },
+        { label: plugin_label ?? route, reasoning },
         // A different vendor entirely, when one is configured.
         route !== "gemini" && has_api_key()
           ? { label: "gemini", reasoning: new GeminiReasoning(provider_opts) }

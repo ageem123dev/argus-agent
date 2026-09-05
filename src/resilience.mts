@@ -20,7 +20,8 @@
  * it never lies about provenance: a review from any rung but the first carries
  * `fallback`, naming what was tried and what answered.
  */
-import { ArgusReasoning, EmptyReviewError, ReviewResult } from "./reasoning.mjs";
+import { ArgusReasoning, Complexity, EmptyReviewError, ReviewResult, deepest } from "./reasoning.mjs";
+import { tier_for_size } from "./review_schema.mjs";
 
 /**
  * The heading argus.mts puts between the diff and the context it gathered.
@@ -88,10 +89,11 @@ export class ResilientReasoning extends ArgusReasoning {
     }
   }
 
-  override async review(diff: string): Promise<ReviewResult> {
+  override async review(diff: string, floor?: Complexity): Promise<ReviewResult> {
     const sleep = this.opts.sleep ?? wait;
     const backoff = this.opts.backoff_ms ?? 2000;
     const failures: string[] = [];
+    let any_empty = false;
 
     for (let i = 0; i < this.rungs.length; i++) {
       const rung = this.rungs[i];
@@ -102,7 +104,13 @@ export class ResilientReasoning extends ArgusReasoning {
 
       try {
         const request = rung.lighten ? rung.lighten(diff) : diff;
-        const result = await rung.reasoning.review(request);
+        // A lightened request is smaller text, and anything that routes by size
+        // reads smaller as simpler. Without a floor taken from the *original*
+        // change, the diff-only rung would answer a complex review on the
+        // cheapest setting — degrading it twice over, once for losing context
+        // and again for dropping a tier.
+        const rung_floor = rung.lighten ? deepest(tier_for_size(diff), floor) : floor;
+        const result = await rung.reasoning.review(request, rung_floor);
 
         // A rung that returns an empty verdict has not answered, whatever it
         // reports. Treated as a failure here so the ladder continues rather
@@ -123,15 +131,21 @@ export class ResilientReasoning extends ArgusReasoning {
         }
         return result;
       } catch (e) {
+        if (e instanceof EmptyReviewError) {
+          any_empty = true;
+        }
         failures.push(`${rung.label}: ${e instanceof Error ? e.message : String(e)}`);
       }
     }
 
-    throw new EmptyReviewError(
+    const summary =
       `every reasoning rung failed, so no review was produced. ` +
-        `This is a failed review, not a clean one. Tried — ${failures.join(" | ")}`,
-      this.rungs.length,
-    );
+      `This is a failed review, not a clean one. Tried — ${failures.join(" | ")}`;
+    // Only an empty answer is an empty answer. A ladder whose every rung failed
+    // because the binary is missing has not produced silence, it has failed to
+    // run — and callers separate those by exit code, so relabelling one as the
+    // other collapses the distinction the codes exist to make.
+    throw any_empty ? new EmptyReviewError(summary, this.rungs.length) : new Error(summary);
   }
 }
 
