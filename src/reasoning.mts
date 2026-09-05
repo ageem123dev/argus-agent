@@ -301,11 +301,18 @@ ${diff.slice(0, 500)}`,
     steps: unknown[],
     confidence: number,
     complexity: string,
+    /**
+     * The model that was asked. Named in the failure because it is the first
+     * thing worth suspecting: a single bad model slug took every review of a
+     * diff over 30 lines down for days, and the message said only which
+     * reasoning path had failed — true, and useless for finding the cause.
+     */
+    model?: string,
   ): ReviewResult {
     if (!text?.trim()) {
       throw new EmptyReviewError(
-        `the ${complexity} reasoning path produced no review text. This is a failed ` +
-          `review, not a clean one.`,
+        `${model ? `${model} ` : ""}produced no review text on the ${complexity} ` +
+          `reasoning path. This is a failed review, not a clean one.`,
       );
     }
     return new ReviewResult(text, steps, confidence, complexity);
@@ -324,7 +331,7 @@ ${diff.slice(0, 500)}`,
         },
       ],
     });
-    return this.built(response_text(response), [], 0.8, "simple");
+    return this.built(response_text(response), [], 0.8, "simple", cfg.model);
   }
 
   /** CoT review with weak-step verification. */
@@ -343,7 +350,7 @@ ${diff.slice(0, 500)}`,
     const confidence = chain.steps.length
       ? Math.min(...chain.steps.map((s) => s.confidence))
       : 0.5;
-    return this.built(chain.final_answer, chain.steps, confidence, complexity);
+    return this.built(chain.final_answer, chain.steps, confidence, complexity, ROUTING_TABLE[complexity].model);
   }
 
   /** COMPLEX path: use the highest reasoning tier from ROUTING_TABLE. */
@@ -363,7 +370,7 @@ ${diff.slice(0, 500)}`,
       kwargs.thinking = cfg.thinking;
     }
     const response = await (await this.client()).messages.create(kwargs);
-    return this.built(response_text(response), [], 0.9, "complex");
+    return this.built(response_text(response), [], 0.9, "complex", cfg.model);
   }
 }
 

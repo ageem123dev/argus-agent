@@ -21,7 +21,7 @@ import * as path from "node:path";
 import { Argus } from "./argus.mjs";
 import { ArgusMemory, HierarchicalMemory, seed_shared } from "./memory.mjs";
 import { JsonlVectorDB, default_memory_path } from "./memory_store.mjs";
-import { ArgusReasoning, OfflineReasoning } from "./reasoning.mjs";
+import { EmptyReviewError, ArgusReasoning, OfflineReasoning } from "./reasoning.mjs";
 import { GeminiReasoning, has_api_key } from "./providers/gemini.mjs";
 import { AnthropicClient } from "./providers/anthropic.mjs";
 import { load_plugin, plugin_spec } from "./providers/plugin.mjs";
@@ -281,10 +281,24 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
       remember: !values["no-memory"],
     });
   } catch (e) {
-    console.error(`error: reasoning failed via provider "${provider}": ${
-      e instanceof Error ? e.message : String(e)
-    }`);
-    return 1;
+    console.error(
+      `error: reasoning failed via provider "${provider}": ` +
+        `${e instanceof Error ? e.message : String(e)}`,
+    );
+    // The models the provider actually called, which the routing slug in the
+    // message above does not name: a plugin maps its own slugs, so a failure
+    // can name claude-sonnet-4-6 while the request went to something else
+    // entirely. When one model starts returning nothing, this line is what
+    // says which one.
+    const attempted = [...new Set(calls.map((c) => c.model))].filter(Boolean);
+    if (attempted.length) {
+      console.error(`  models actually called: ${attempted.join(", ")}`);
+    }
+    // 2 means the review ran and produced nothing; 1 means it could not run.
+    // The guard that refuses an empty verdict throws rather than returning,
+    // so without this the distinction the exit codes are documented to make
+    // collapses the moment that guard is the thing that fires.
+    return e instanceof EmptyReviewError ? 2 : 1;
   }
 
   if (outcome.blocked_reason) {
