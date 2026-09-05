@@ -21,7 +21,7 @@ import * as path from "node:path";
 import { Argus } from "./argus.mjs";
 import { ArgusMemory, HierarchicalMemory, seed_shared } from "./memory.mjs";
 import { JsonlVectorDB, default_memory_path } from "./memory_store.mjs";
-import { ArgusReasoning, OfflineReasoning } from "./reasoning.mjs";
+import { EmptyReviewError, ArgusReasoning, OfflineReasoning } from "./reasoning.mjs";
 import { GeminiReasoning, has_api_key } from "./providers/gemini.mjs";
 import { AnthropicClient } from "./providers/anthropic.mjs";
 import { load_plugin, plugin_spec } from "./providers/plugin.mjs";
@@ -294,7 +294,11 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
     if (attempted.length) {
       console.error(`  models actually called: ${attempted.join(", ")}`);
     }
-    return 1;
+    // 2 means the review ran and produced nothing; 1 means it could not run.
+    // The guard that refuses an empty verdict throws rather than returning,
+    // so without this the distinction the exit codes are documented to make
+    // collapses the moment that guard is the thing that fires.
+    return e instanceof EmptyReviewError ? 2 : 1;
   }
 
   if (outcome.blocked_reason) {
