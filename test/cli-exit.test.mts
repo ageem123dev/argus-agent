@@ -103,7 +103,18 @@ function run(plugin: string): Promise<number> {
         "--provider",
         "plugin",
       ],
-      { env: { ...process.env, ARGUS_REASONING_PLUGIN: path.join(tmp, plugin) } },
+      {
+        env: {
+          ...process.env,
+          ARGUS_REASONING_PLUGIN: path.join(tmp, plugin),
+          // Scrubbed, not merely unset here: a machine with either key gets a
+          // third ladder rung, and a Gemini that answers turns exit 2 into 0.
+          // The suite would then pass or fail by whose laptop it ran on, and
+          // would make a real API call while doing it.
+          GEMINI_API_KEY: undefined,
+          GOOGLE_API_KEY: undefined,
+        } as NodeJS.ProcessEnv,
+      },
       (err) => resolve((err as { code?: number } | null)?.code ?? 0),
     );
   });
