@@ -5,11 +5,21 @@
  * ARGUS_LIVE_TEST=1. It is skipped otherwise, including in CI.
  *
  * It exists because the rest of the suite structurally cannot catch this class.
- * On 2026-09-05 every review of a diff over 30 lines came back empty for days:
- * `gemini-3.7-flash-high` under agy 1.1.27 consumed tokens and returned an empty
- * response, and both routed tiers above SIMPLE pointed at it. Every stubbed test
- * passed throughout, because a stub answers whatever it is told to. Only a real
- * call can tell you a real model has stopped answering.
+ * On 2026-09-05 every review of a diff over 30 lines came back empty for days,
+ * while a trivial prompt kept working. Measured on one fixed ~12k review task:
+ *
+ *   gemini-3.8-flash-high     1/2 empty   ~45k thinking tokens, ~164s
+ *   gemini-3.7-flash-high     1/2 empty   ~53k thinking tokens, ~202s
+ *   gemini-3.8-flash-medium   1/3 empty   ~17-27k thinking,   ~83-118s
+ *   gemini-3.7-flash-medium   0/6 empty   ~10k thinking,       ~30-37s
+ *
+ * The failures track request weight, not model generation: the heavier and
+ * slower the call, the likelier it comes back empty, and the failures arrive as
+ * upstream aborts — one CANCELED mid-thinking, one bailing after 6s having
+ * thought 106 tokens. That is what a provider-side outage looks like from here,
+ * not a bad slug. Every stubbed test passed throughout, because a stub answers
+ * whatever it is told to. Only a real call can tell you a real model has
+ * stopped answering.
  *
  *   ARGUS_LIVE_TEST=1 npm test
  *   ARGUS_LIVE_TEST=1 ARGUS_REASONING_PLUGIN=<path> npx tsx --test test/live-provider.test.mts
