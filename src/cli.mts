@@ -23,6 +23,7 @@ import { ArgusMemory, HierarchicalMemory, seed_shared } from "./memory.mjs";
 import { JsonlVectorDB, default_memory_path } from "./memory_store.mjs";
 import { EmptyReviewError, ArgusReasoning, OfflineReasoning } from "./reasoning.mjs";
 import { GeminiReasoning, has_api_key } from "./providers/gemini.mjs";
+import { ResilientReasoning, default_ladder } from "./resilience.mjs";
 import { AnthropicClient } from "./providers/anthropic.mjs";
 import { load_plugin, plugin_spec } from "./providers/plugin.mjs";
 import { PROVIDERS, resolve_route, route_note, type Provider } from "./routing.mjs";
@@ -221,6 +222,7 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
     console.error(note);
   }
 
+  // Named before the ladder wraps it, so a rung label says which provider.
   let plugin_name: string | undefined;
   let reasoning;
   if (provider === "plugin") {
@@ -256,6 +258,27 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
           ? new ArgusReasoning(new AnthropicClient(provider_opts))
           : new OfflineReasoning();
   }
+  const answered_label = plugin_name ? `plugin:${plugin_name}` : provider;
+
+  // Wrapped in the ladder so instability is absorbed here rather than by
+  // whoever called us. The second rung is the same provider on the diff
+  // alone: lighter requests are what actually change the odds when a
+  // provider is dropping heavy ones, and a narrower real review beats a
+  // lost one. If every rung fails it still fails — never a fake clean run.
+  reasoning = new ResilientReasoning(
+    default_ladder(
+      { label: answered_label, reasoning },
+      // A different vendor entirely, when one is configured.
+      answered_label !== "gemini" && has_api_key()
+        ? { label: "gemini", reasoning: new GeminiReasoning(provider_opts) }
+        : undefined,
+    ),
+    {
+      on_attempt: (label, n) =>
+        n > 0 &&
+        console.error(`note: ${label} — attempt ${n + 1} after the previous produced no review.`),
+    },
+  );
 
   const diff = fs.readFileSync(diff_file, "utf-8");
   const repo_root = values.repo as string;

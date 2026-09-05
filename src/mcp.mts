@@ -28,6 +28,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { Argus } from "./argus.mjs";
 import { ArgusReasoning, OfflineReasoning } from "./reasoning.mjs";
 import { GeminiReasoning, has_api_key } from "./providers/gemini.mjs";
+import { ResilientReasoning, default_ladder } from "./resilience.mjs";
 import { AnthropicClient } from "./providers/anthropic.mjs";
 import { load_plugin, plugin_spec } from "./providers/plugin.mjs";
 import { PROVIDERS, resolve_route } from "./routing.mjs";
@@ -227,6 +228,7 @@ server.registerTool(
       console.error(`argus: auto selected the ${route} provider.`);
     }
 
+    let plugin_label: string | undefined;
     let reasoning;
     if (route === "plugin") {
       if (!configured_plugin) {
@@ -248,7 +250,11 @@ server.registerTool(
         );
       }
       try {
-        reasoning = (await load_plugin(configured_plugin.path, repo_root, provider_opts)).reasoning;
+        const loaded = await load_plugin(configured_plugin.path, repo_root, provider_opts);
+        reasoning = loaded.reasoning;
+        // Named, not just typed: fallback metadata has to identify which
+        // plugin answered, exactly as the CLI records plugin:<name>.
+        plugin_label = `plugin:${loaded.name}`;
       } catch (e) {
         return {
           content: [
@@ -263,7 +269,27 @@ server.registerTool(
           : route === "anthropic"
             ? new ArgusReasoning(new AnthropicClient(provider_opts))
             : new OfflineReasoning();
+
     }
+    // Wrapped in the ladder so instability is absorbed here rather than by
+    // whoever called us. The second rung is the same provider on the diff
+    // alone: lighter requests are what actually change the odds when a
+    // provider is dropping heavy ones, and a narrower real review beats a
+    // lost one. If every rung fails it still fails — never a fake clean run.
+    reasoning = new ResilientReasoning(
+      default_ladder(
+        { label: plugin_label ?? route, reasoning },
+        // A different vendor entirely, when one is configured.
+        route !== "gemini" && has_api_key()
+          ? { label: "gemini", reasoning: new GeminiReasoning(provider_opts) }
+          : undefined,
+      ),
+      {
+        on_attempt: (label, n) =>
+          n > 0 &&
+          console.error(`note: ${label} — attempt ${n + 1} after the previous produced no review.`),
+      },
+    );
 
     // Memory is on by default; Argus opens the repo's store itself.
     const argus = new Argus({ reasoning });
